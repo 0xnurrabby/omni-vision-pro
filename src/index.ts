@@ -36,9 +36,8 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
+import { getOmniEnvironmentFile, PACKAGE_NAME, PACKAGE_VERSION } from "./paths.js";
 
-const PACKAGE_NAME = "omni-vision-pro";
-const PACKAGE_VERSION = "1.0.0";
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const ENV_ALLOWLIST = new Set([
@@ -150,7 +149,9 @@ function envInteger(name: string, fallback: number, minimum: number, maximum: nu
 }
 
 function loadEnvironment(): void {
-  const candidates = [resolve(process.cwd(), ".env"), resolve(PACKAGE_ROOT, ".env")];
+  // Earlier files win because values are filled only when the process does not
+  // already define them: process > project > private Omni config > package.
+  const candidates = [resolve(process.cwd(), ".env"), getOmniEnvironmentFile(), resolve(PACKAGE_ROOT, ".env")];
   const seen = new Set<string>();
   for (const candidate of candidates) {
     if (seen.has(candidate) || !existsSync(candidate)) continue;
@@ -1304,14 +1305,9 @@ server.registerTool(
   },
 );
 
-async function main(): Promise<void> {
+export async function startMcpServer(): Promise<void> {
   await access(PACKAGE_ROOT, fsConstants.R_OK);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   process.stderr.write(`[${PACKAGE_NAME}] MCP server ready\n`);
 }
-
-main().catch((error: unknown) => {
-  process.stderr.write(`[${PACKAGE_NAME}] Fatal startup error: ${sanitizeError(error)}\n`);
-  process.exitCode = 1;
-});

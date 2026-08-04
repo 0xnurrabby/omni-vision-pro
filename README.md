@@ -1,178 +1,258 @@
 # omni-vision-pro
 
-`omni-vision-pro` is a local Model Context Protocol (MCP) server that turns screenshots, source code, folders, and ZIP archives into clean text context for non-vision models.
+`omni-vision-pro` is a local Model Context Protocol (MCP) server that gives text-only coding models useful context from screenshots, source trees, and ZIP archives.
 
-It is designed for OpenCode, Claude Desktop, VS Code MCP clients, and other applications that can launch a standard `stdio` MCP server.
+It is designed for Codex, OpenCode, Claude Code, Cursor, Claude Desktop, and other clients that can launch a local MCP server over `stdio`.
 
-## What it provides
+## Fastest setup
 
-The server exposes three tools:
+Requirements:
 
-- `analyze_images` — analyzes one image or an ordered array of images. It accepts normal paths, `file://` URLs, Markdown image links, OpenCode attachment references, and `data:image/...;base64,...` URLs.
-- `read_code_context` — reads a code file or directory and returns a file tree plus safe text contents.
-- `read_zip_context` — inspects a `.zip` archive entirely in memory and returns a virtual file tree plus safe text contents.
+- Node.js 20.10 or newer
+- npm/npx
+- At least one supported MCP client
 
-Images are always processed sequentially in the exact order supplied. Every result has a delimiter such as:
+Check your installation:
 
-```text
---- [Index 1] Visual UI JSON Analysis (Provider: OpenAI) ---
+```bash
+node --version
+npm --version
 ```
 
-## Image provider order
+Run the guided installer:
 
-For every image, the server uses the first provider that succeeds:
+```bash
+npx --yes omni-vision-pro@latest setup
+```
 
-1. Gemini when `GEMINI_API_KEY` is configured.
-2. OpenAI when `OPENAI_API_KEY` is configured.
-3. Local Tesseract OCR when no cloud key is configured or cloud providers fail.
+The installer:
 
-If both cloud keys are configured, Gemini is intentionally tried first and OpenAI is the second cloud fallback. A failure on one image does not stop later images.
+- detects Codex, OpenCode, Claude Code, and Cursor;
+- asks which clients to configure;
+- lets you choose free local OCR, Gemini, OpenAI, or both cloud providers;
+- stores cloud keys in one private Omni settings file instead of copying them into every client config;
+- installs a private, version-pinned runtime;
+- preserves unrelated client settings and backs up JSON/JSONC files before changing them; and
+- starts the MCP server and verifies that all three tools are discoverable.
 
-### OpenAI cost controls
+### Copy and paste this into an AI coding chat
 
-Before an image is sent to OpenAI, `sharp` automatically:
+```text
+Run this for me, then run its doctor:
+npx --yes omni-vision-pro@latest setup --yes --provider ocr
+npx --yes omni-vision-pro@latest doctor
 
-- applies EXIF orientation;
-- limits the output to a 1024 × 1024 bounding box without enlargement;
-- re-encodes screenshots/alpha images as optimized PNG and photographs as JPEG;
-- strips unnecessary metadata; and
-- sends the image with an explicit `detail: "low"` image-content setting.
+Do not change unrelated MCP entries or put API keys in commands or JSON files. Tell me which apps I need to restart and where I need to approve the MCP server.
+```
 
-The completion is also constrained to concise JSON with a fixed output-token ceiling. This is strongly cost-optimized, but exact price cannot be permanently guaranteed because provider pricing, generated output, and retries can change. OpenAI low-detail mode also internally uses a reduced representation, so tiny text, precise coordinates, and model-estimated colors are best-effort rather than pixel-perfect.
+That instruction selects the free, fully local OCR mode. To enable Gemini or OpenAI, run the guided setup yourself so the key can be entered through its hidden prompt.
 
-To improve deterministic visual context without additional vision tokens, the server measures the source dimensions, output dimensions, dominant color, and an eight-color local palette with `sharp`.
+## Choose the vision mode
 
-### Gemini model compatibility
+### Free local OCR
 
-The requested default is `gemini-1.5-flash`. Google has retired that model in some/current API environments, so the server automatically tries `gemini-2.5-flash` only when the legacy model is reported unavailable. You can choose a model explicitly:
+Choose this when screenshots mainly contain readable text and you do not want any image sent to a cloud provider.
+
+```bash
+npx --yes omni-vision-pro@latest setup --provider ocr
+```
+
+Tesseract English language data is bundled with the package. OCR extracts text but does not reliably infer icons, component boundaries, layout, or colors.
+
+### Gemini
+
+Choose Gemini for full UI/layout JSON analysis:
+
+```bash
+npx --yes omni-vision-pro@latest setup --provider gemini
+```
+
+The installer asks for `GEMINI_API_KEY` through a hidden prompt if it is not already available in your environment. The server uses Gemini first and falls back to local OCR if the API fails or its quota is exhausted.
+
+The originally requested `gemini-1.5-flash` model is retired in current Google API environments. The server retains compatibility behavior and falls back to `gemini-2.5-flash`. To skip the legacy attempt, add this to the private Omni `.env` file:
 
 ```env
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-You may also change only the automatic fallback:
-
-```env
-GEMINI_FALLBACK_MODEL=gemini-2.5-flash
-```
-
-### Local OCR
-
-Tesseract OCR requires no API key. Its English language data is packaged locally, so normal OCR fallback does not need to download a language file at runtime.
-
-OCR extracts visible text only. It does not reliably infer layout, icons, component boundaries, or element colors.
-
-## OpenCode image-path handling
-
-OpenCode can represent an attached image in more than one way. `omni-vision-pro` handles the recoverable forms by:
-
-- using exact absolute paths;
-- resolving paths relative to the MCP server working directory;
-- decoding `file://` paths, quoted paths, `@path` references, and Markdown image links;
-- checking known OpenCode data/cache locations and `${temporary-directory}/opencode`;
-- checking system temporary directories for an exact filename match;
-- recognizing the known `opencode-clipboard.png` temporary filename; and
-- accepting an inline `data:image/...;base64,...` URL when the MCP client forwards the attachment bytes directly.
-
-The cache scan is bounded by depth and entry limits, never scans an entire home drive, and does not follow symlinks or junctions.
-
-An important host limitation: some OpenCode builds keep pasted images only as in-memory data URLs and never create a durable file. No filesystem scanner can recover bytes that were never written. In that case, the client/model must pass the attachment's data URL to `analyze_images`; the tool supports it directly and does not require copying the image into a special folder.
-
-## Safety for code and ZIP files
-
-Code and archive tools intentionally omit common generated/vendor folders:
-
-```text
-node_modules, .git, dist, build, .next, coverage, __MACOSX
-```
-
-They also omit likely secrets, including:
-
-```text
-.env, .env.*, id_rsa, id_ed25519, *.pem, *.key, *.p12, *.pfx,
-.npmrc, .netrc, .pypirc, credentials.json, service-account.json
-```
-
-Additional protections include:
-
-- binary-content detection in addition to extension checks;
-- strict UTF-8 validation;
-- no filesystem symlink traversal;
-- maximum scan count, file count, per-file size, aggregate output, and diagnostic limits;
-- ZIP path traversal, drive path, UNC path, control character, duplicate path, encryption, and symlink rejection;
-- ZIP entry, bounded-inflation, CRC-32, aggregate-size, and compression-ratio limits;
-- malformed, multi-disk, and ZIP64 archive rejection;
-- no nested archive expansion; and
-- no ZIP extraction to disk.
-
-By default, code and ZIP tools can read only inside the MCP server's current working directory. Images are exempt because OpenCode/system temporary attachments must still resolve. To allow other project folders, configure `OMNI_ALLOWED_ROOTS`; code and ZIP tools will then read only inside the listed roots.
-
-Windows uses semicolons between roots:
-
-```env
-OMNI_ALLOWED_ROOTS=C:\Users\you\Projects;D:\Work
-```
-
-macOS and Linux use colons:
-
-```env
-OMNI_ALLOWED_ROOTS=/Users/you/Projects:/Volumes/Work
-```
-
-## Requirements
-
-- Node.js 20.10 or newer. A current Node.js LTS release is recommended.
-- An MCP-compatible desktop/editor client.
-- Optional: a Gemini or OpenAI API key. No key is needed for OCR-only mode.
-
-## Install from npm
-
-You normally do not need a global installation. The configuration examples below use `npx`, which downloads and launches the package automatically.
-
-For repeatable/offline startup after an initial install, you can instead run:
-
-```bash
-npm install --global omni-vision-pro
-```
-
-Then use `omni-vision-pro` as the client command.
-
-## Configure OpenCode
-
-Create `opencode.json` in your project folder. You can instead use the global OpenCode configuration at `~/.config/opencode/opencode.json`.
-
-### Gemini
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "omni-vision-pro": {
-      "type": "local",
-      "command": ["npx", "-y", "omni-vision-pro"],
-      "environment": {
-        "GEMINI_API_KEY": "PASTE_YOUR_GEMINI_KEY_HERE",
-        "GEMINI_MODEL": "gemini-2.5-flash"
-      },
-      "enabled": true,
-      "timeout": 120000
-    }
-  }
-}
-```
-
 ### OpenAI
 
+Choose OpenAI for cost-optimized UI/layout JSON analysis:
+
+```bash
+npx --yes omni-vision-pro@latest setup --provider openai
+```
+
+Images are auto-oriented, resized inside a 1024 by 1024 box, compressed with `sharp`, and sent to `gpt-4o-mini` with an explicit `detail: "low"` setting. Cloud failure automatically falls back to local OCR.
+
+Low-detail mode is intentionally economical, but exact cost cannot be permanently guaranteed because pricing and output length can change. It also uses a reduced image representation, so tiny text, exact coordinates, and model-estimated colors are best-effort rather than pixel-perfect. The server supplements the model response with locally measured dimensions, dominant color, and a compact color palette.
+
+### Gemini plus OpenAI fallback
+
+Configure both keys when you want the provider order Gemini, then OpenAI, then local OCR:
+
+```bash
+npx --yes omni-vision-pro@latest setup --provider both
+```
+
+Never pass keys with command-line flags. The CLI intentionally rejects `--gemini-key` and `--openai-key` because shell history and process lists can expose them.
+
+## Set up particular clients
+
+The guided installer can configure one client:
+
+```bash
+npx --yes omni-vision-pro@latest setup codex
+npx --yes omni-vision-pro@latest setup opencode
+npx --yes omni-vision-pro@latest setup claude-code
+npx --yes omni-vision-pro@latest setup cursor
+```
+
+Or all supported clients:
+
+```bash
+npx --yes omni-vision-pro@latest setup all
+```
+
+User-wide setup is the default. For a project-only OpenCode, Claude Code, or Cursor entry, run the command from the project folder with `--project`:
+
+```bash
+npx --yes omni-vision-pro@latest setup cursor --project
+```
+
+Codex project setup is intentionally manual because Codex only loads project `.codex/config.toml` from trusted projects. See [Codex](#codex).
+
+For unattended, OCR-only setup of detected clients:
+
+```bash
+npx --yes omni-vision-pro@latest setup --yes --provider ocr
+```
+
+## After setup
+
+Completely restart or reload the configured client:
+
+- Codex desktop app: open **Settings > MCP servers**, then restart if requested.
+- Codex CLI/TUI: start a new session and use `/mcp`.
+- Codex IDE extension: select **Restart extension** from its MCP server settings.
+- OpenCode: close and reopen OpenCode, then run `opencode mcp list` if needed.
+- Claude Code: restart the session and use `/mcp` or `claude mcp list`.
+- Cursor: reload the window, open **Settings > Tools & MCP**, and enable the server if it is disabled.
+
+Project-scoped MCP files can trigger a trust or permission prompt. Review the command, confirm that it points to `omni-vision-pro`, and approve it only if you trust the project.
+
+Then attach an image and ask:
+
+```text
+Use omni-vision-pro to analyze this image. Return the UI hierarchy, visible text, colors, interactions, accessibility issues, and reusable components.
+```
+
+Other useful requests:
+
+```text
+Use omni-vision-pro to analyze these screenshots in the exact attached order and compare their responsive layouts.
+```
+
+```text
+Use omni-vision-pro to read the code context from this project's src folder and summarize its architecture.
+```
+
+```text
+Use omni-vision-pro to inspect this ZIP without extracting it and return its safe file tree and source contents.
+```
+
+## Doctor and uninstall
+
+Verify the managed runtime and every detected client entry:
+
+```bash
+npx --yes omni-vision-pro@latest doctor
+```
+
+Check one client:
+
+```bash
+npx --yes omni-vision-pro@latest doctor cursor
+```
+
+Remove installer-owned entries from detected clients:
+
+```bash
+npx --yes omni-vision-pro@latest uninstall
+```
+
+Remove entries from every supported client:
+
+```bash
+npx --yes omni-vision-pro@latest uninstall --all
+```
+
+Project entries require `--project` and must be removed from the project directory:
+
+```bash
+npx --yes omni-vision-pro@latest uninstall cursor --project
+```
+
+Uninstall removes only an `omni-vision-pro` entry that the installer recognizes as its own. It refuses to overwrite or remove a foreign same-name entry. Provider settings are deliberately kept so reinstalling does not lose keys.
+
+## Manual configuration
+
+Manual examples use `@latest`. For reproducible startup, replace it with an exact version such as `@1.1.0`.
+
+The MCP launch command is:
+
+```text
+npx --yes omni-vision-pro@latest serve
+```
+
+Cloud keys do not need to appear in the client JSON/TOML. Put them in the dedicated settings file described in [API keys and private settings](#api-keys-and-private-settings), or expose them to the client process as normal environment variables.
+
+### Codex
+
+Codex CLI, the Codex IDE extension, and the Codex desktop app share `~/.codex/config.toml`.
+
+The simplest user-wide command is:
+
+```bash
+codex mcp add omni-vision-pro -- npx --yes omni-vision-pro@latest serve
+```
+
+Verify it:
+
+```bash
+codex mcp get omni-vision-pro --json
+codex mcp list
+```
+
+For manual TOML, add this to `~/.codex/config.toml`, or to `.codex/config.toml` inside a trusted project:
+
+```toml
+[mcp_servers.omni-vision-pro]
+command = "npx"
+args = ["--yes", "omni-vision-pro@latest", "serve"]
+startup_timeout_sec = 120
+tool_timeout_sec = 1200
+enabled = true
+```
+
+In the Codex desktop app you can instead open **Settings > MCP servers > Add server**, select **STDIO**, and enter the same command and arguments. Save, then select **Restart**.
+
+### OpenCode
+
+Add this to a project `opencode.json`/`opencode.jsonc`, or to the user config at `~/.config/opencode/opencode.json`. On Windows, `~` means your user folder, for example `C:\Users\you\.config\opencode\opencode.json`:
+
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "omni-vision-pro": {
       "type": "local",
-      "command": ["npx", "-y", "omni-vision-pro"],
-      "environment": {
-        "OPENAI_API_KEY": "PASTE_YOUR_OPENAI_KEY_HERE"
-      },
+      "command": [
+        "npx",
+        "--yes",
+        "omni-vision-pro@latest",
+        "serve"
+      ],
       "enabled": true,
       "timeout": 120000
     }
@@ -180,172 +260,179 @@ Create `opencode.json` in your project folder. You can instead use the global Op
 }
 ```
 
-### Free OCR-only mode
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "omni-vision-pro": {
-      "type": "local",
-      "command": ["npx", "-y", "omni-vision-pro"],
-      "enabled": true,
-      "timeout": 120000
-    }
-  }
-}
-```
-
-Restart OpenCode after saving. You can check the MCP connection with:
+Restart OpenCode and check:
 
 ```bash
 opencode mcp list
 ```
 
-For project-local `.env` loading, set OpenCode's `cwd` to the folder containing `.env`, or put the key in the `environment` object as shown above. Client environment configuration is the most reliable choice for desktop applications.
+OpenCode sometimes forwards pasted images as inline data rather than a durable file. `analyze_images` accepts `data:image/...;base64,...` directly. It also checks absolute and relative paths, known OpenCode cache locations, and bounded recent-image searches in system temporary folders; it never tells the user to copy an attachment into a special directory.
 
-## Configure Claude Desktop
+### Claude Code
 
-Open Claude Desktop, go to **Settings → Developer → Edit Config**, and add one of the configurations below.
+For a private user-wide entry:
 
-Configuration file locations:
+```bash
+claude mcp add --scope user --transport stdio omni-vision-pro -- npx --yes omni-vision-pro@latest serve
+```
+
+For a team-shareable project entry, run this from the project root:
+
+```bash
+claude mcp add --scope project --transport stdio omni-vision-pro -- npx --yes omni-vision-pro@latest serve
+```
+
+The project command creates or updates `.mcp.json`. Claude Code asks users to approve project-scoped MCP servers before first use.
+
+Equivalent `.mcp.json` content:
+
+```json
+{
+  "mcpServers": {
+    "omni-vision-pro": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "omni-vision-pro@latest",
+        "serve"
+      ],
+      "timeout": 1200000
+    }
+  }
+}
+```
+
+Verify with:
+
+```bash
+claude mcp list
+claude mcp get omni-vision-pro
+```
+
+### Cursor
+
+#### One-click OCR installation
+
+[Add omni-vision-pro to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=omni-vision-pro&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyItLXllcyIsIm9tbmktdmlzaW9uLXByb0BsYXRlc3QiLCJzZXJ2ZSJdfQ==)
+
+Cursor will show the decoded MCP configuration before installation. Review it and approve only if it launches `npx --yes omni-vision-pro@latest serve`. The one-click link installs the MCP entry; it does not add a cloud API key, so it starts in local OCR mode unless the private Omni settings file already contains a key.
+
+#### Manual Cursor configuration
+
+Use `~/.cursor/mcp.json` for your user account or `.cursor/mcp.json` for one project:
+
+```json
+{
+  "mcpServers": {
+    "omni-vision-pro": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "omni-vision-pro@latest",
+        "serve"
+      ]
+    }
+  }
+}
+```
+
+Reload Cursor, open **Settings > Tools & MCP**, and switch the server on. A workspace entry may require project trust.
+
+### Visual Studio Code
+
+In VS Code, run **MCP: Add Server** from the Command Palette for a guided setup. Choose a local `stdio` server and enter the same `npx --yes omni-vision-pro@latest serve` launch command.
+
+For manual setup, run **MCP: Open User Configuration** for an account-wide entry, or create `.vscode/mcp.json` in one project:
+
+```json
+{
+  "servers": {
+    "omni-vision-pro": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "--yes",
+        "omni-vision-pro@latest",
+        "serve"
+      ]
+    }
+  }
+}
+```
+
+Save the file, start the server from the inline action above its entry or run **MCP: List Servers**, and review the trust prompt before approving it. VS Code's official MCP setup reference is [Add and manage MCP servers in VS Code](https://code.visualstudio.com/docs/agent-customization/mcp-servers).
+
+### Claude Desktop
+
+Claude Desktop is not changed by the multi-client installer, but it can launch the same server. Add this to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "omni-vision-pro": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "omni-vision-pro@latest",
+        "serve"
+      ]
+    }
+  }
+}
+```
+
+Common locations:
 
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-Claude Desktop is officially available on Windows and macOS. On Linux, use OpenCode or another standard MCP client.
+Completely quit and reopen Claude Desktop after saving.
 
-### Gemini
+## API keys and private settings
 
-```json
-{
-  "mcpServers": {
-    "omni-vision-pro": {
-      "command": "npx",
-      "args": ["-y", "omni-vision-pro"],
-      "env": {
-        "GEMINI_API_KEY": "PASTE_YOUR_GEMINI_KEY_HERE",
-        "GEMINI_MODEL": "gemini-2.5-flash"
-      }
-    }
-  }
-}
-```
+Guided setup stores keys in a dedicated `.env` file:
 
-### OpenAI
-
-```json
-{
-  "mcpServers": {
-    "omni-vision-pro": {
-      "command": "npx",
-      "args": ["-y", "omni-vision-pro"],
-      "env": {
-        "OPENAI_API_KEY": "PASTE_YOUR_OPENAI_KEY_HERE"
-      }
-    }
-  }
-}
-```
-
-### Free OCR-only mode
-
-```json
-{
-  "mcpServers": {
-    "omni-vision-pro": {
-      "command": "npx",
-      "args": ["-y", "omni-vision-pro"]
-    }
-  }
-}
-```
-
-Completely quit and reopen Claude Desktop after saving the file.
-
-## Use a local source checkout
-
-From this package folder:
-
-```bash
-npm install
-npm run build
-```
-
-Then point the client to the built entry file using an absolute path.
-
-OpenCode example on Windows:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "omni-vision-pro": {
-      "type": "local",
-      "command": ["node", "C:/full/path/to/omni-vision-pro/dist/index.js"],
-      "enabled": true,
-      "timeout": 120000
-    }
-  }
-}
-```
-
-Claude Desktop example:
-
-```json
-{
-  "mcpServers": {
-    "omni-vision-pro": {
-      "command": "node",
-      "args": ["C:/full/path/to/omni-vision-pro/dist/index.js"]
-    }
-  }
-}
-```
-
-Forward slashes work in Windows JSON and avoid backslash escaping mistakes.
-
-## Use `.env`
-
-The server loads `.env` from its current working directory and, for a local package checkout, the package root. Existing environment variables always take priority. For safety, only documented `GEMINI_*`, `OPENAI_API_KEY`, `OMNI_*`, and OpenCode cache-location settings are accepted from `.env`; unrelated entries are ignored.
+- Windows: `%APPDATA%\omni-vision-pro\.env`
+- macOS/Linux: `${XDG_CONFIG_HOME:-~/.config}/omni-vision-pro/.env`
 
 Example:
 
 ```env
-# Choose either or both. Gemini is tried first when both exist.
+# Choose either or both. Gemini is tried first when both are present.
 GEMINI_API_KEY=your_gemini_key
 GEMINI_MODEL=gemini-2.5-flash
 OPENAI_API_KEY=your_openai_key
-
-# Optional filesystem boundary for code and ZIP tools.
-OMNI_ALLOWED_ROOTS=C:\Users\you\Projects
 ```
 
-Never commit `.env` or API keys to source control.
+The server also reads a `.env` in its working directory, but only documented Gemini, OpenAI key, Omni, and OpenCode cache variables are accepted. Unrelated provider transport variables are ignored or removed so a project cannot redirect API requests or enable SDK debug logging.
 
-## Example requests
+Security rules:
 
-After the MCP server is connected, ask your client naturally:
+- Never put API keys in chat messages, screenshots, command arguments, committed JSON/TOML, or source control.
+- Prefer the installer's hidden key prompt.
+- Restrict access to the private `.env`. Setup uses mode `0600` on macOS/Linux; Windows inherits the account directory's ACLs.
+- Rotate a key immediately if it appears in terminal history, logs, a repository, or a shared configuration.
+- Cloud modes upload the resized image to the selected provider. OCR mode keeps image processing local.
 
-```text
-Use omni-vision-pro to analyze this screenshot and reconstruct its UI hierarchy.
-```
+To erase retained credentials after uninstalling, delete only the private `.env` listed above. The managed runtime cache is stored under:
 
-```text
-Use omni-vision-pro to analyze these three screenshots in the exact order attached. Compare the responsive layout changes.
-```
+- Windows: `%LOCALAPPDATA%\omni-vision-pro\runtimes`
+- macOS: `~/Library/Application Support/omni-vision-pro/runtimes`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/omni-vision-pro/runtimes`
 
-```text
-Use omni-vision-pro to read the code context from C:/Projects/my-app/src and summarize the architecture.
-```
-
-```text
-Use omni-vision-pro to inspect C:/Downloads/source-bundle.zip without extracting it and return the file tree plus relevant source files.
-```
-
-## Tool inputs
+## Tools
 
 ### `analyze_images`
+
+Accepts one image reference or an ordered array. Images are processed strictly in upload order and returned with delimiters such as:
+
+```text
+--- [Index 1] Visual UI JSON Analysis (Provider: OpenAI) ---
+```
+
+Example input:
 
 ```json
 {
@@ -353,13 +440,15 @@ Use omni-vision-pro to inspect C:/Downloads/source-bundle.zip without extracting
     "C:/Screenshots/home.png",
     "C:/Screenshots/settings.png"
   ],
-  "prompt": "Focus on reusable React components and accessibility."
+  "prompt": "Focus on reusable components and accessibility."
 }
 ```
 
-`image_paths` may also be a single string. The tool processes at most 10 images by default.
+Supported references include absolute and relative paths, `file://` URLs, quoted paths, `@path`, Markdown image links, common OpenCode attachment references, and inline image data URLs. A failed image produces its own ordered result and does not stop later images.
 
 ### `read_code_context`
+
+Reads a source file or directory and returns a clean file tree followed by text contents:
 
 ```json
 {
@@ -369,7 +458,21 @@ Use omni-vision-pro to inspect C:/Downloads/source-bundle.zip without extracting
 }
 ```
 
+By default, code and ZIP access is limited to the MCP process working directory. To allow additional folders, set `OMNI_ALLOWED_ROOTS` in the private `.env`:
+
+```env
+# Windows: semicolon-separated
+OMNI_ALLOWED_ROOTS=C:\Users\you\Projects;D:\Work
+```
+
+```env
+# macOS/Linux: colon-separated
+OMNI_ALLOWED_ROOTS=/Users/you/Projects:/Volumes/Work
+```
+
 ### `read_zip_context`
+
+Reads a `.zip` archive in memory without extracting it to disk:
 
 ```json
 {
@@ -379,59 +482,126 @@ Use omni-vision-pro to inspect C:/Downloads/source-bundle.zip without extracting
 }
 ```
 
-## Privacy
+The code and ZIP tools omit common generated folders, binaries, symbolic links, and likely secrets such as `.env`, private keys, credentials files, `node_modules`, `.git`, `dist`, `build`, and `.next`. ZIP handling also validates paths, entry counts, declared and actual sizes, compression ratios, CRC-32, duplicate paths, encryption, and malformed archives. Nested ZIPs are not expanded.
 
-- Gemini mode transmits a resized copy of each image to Google.
-- OpenAI mode transmits a resized copy of each image to OpenAI.
-- Tesseract mode keeps OCR processing on the local machine.
-- Source files and ZIP contents are read locally and are not automatically sent to Gemini or OpenAI by this server. The MCP client/model may still include returned tool text in its own model context according to that client's privacy policy.
-- Absolute host paths are redacted from tool output by default. Set `OMNI_INCLUDE_ABSOLUTE_PATHS=true` only if the consuming model genuinely needs them.
+Returned source/archive text is explicitly marked as untrusted data for the consuming model. Filtering is defense in depth, not permission to process an archive from an untrusted sender without reviewing it.
 
 ## Troubleshooting
 
-### The client cannot find `npx`
+### Check the installed npm version
 
-Check that Node.js is installed:
+If a setup command behaves differently from this README, check the currently published version:
 
 ```bash
-node --version
-npx --version
+npm view omni-vision-pro version
 ```
 
-Desktop applications sometimes have a smaller `PATH` than your terminal. Find the full path:
+Automatic setup needs `1.1.0` or newer. Update with `@latest` and try again.
 
-- Windows: `where npx`
-- macOS/Linux: `which npx`
+### The desktop client cannot find `npx`
 
-Then use that absolute path as the client command. On Windows it may look like `C:\\Program Files\\nodejs\\npx.cmd` inside JSON.
+Guided setup normally avoids this after installation by configuring clients with the absolute Node path to its managed runtime. Manual and Cursor one-click configurations still use `npx`.
 
-### The first OCR request takes longer
+Find it with:
 
-Tesseract starts a local worker on first fallback. Keep the OpenCode timeout at `120000` milliseconds or increase it if the computer is slow.
+```powershell
+where.exe npx
+```
 
-### An image is not found
+```bash
+which npx
+```
 
-The resolver automatically tries normal paths and known OpenCode/system temporary locations. If the image existed only in OpenCode memory, ask the client/model to pass the attachment as an inline data URL to `analyze_images`; no manual file-copy step is required.
+Then replace `npx` in the manual configuration with its full path. On Windows this is often `C:\Program Files\nodejs\npx.cmd`; JSON requires doubled backslashes, or you can use forward slashes.
 
-### Gemini fails but the key is valid
+### The MCP server is installed but not visible
 
-Set an active model explicitly:
+1. Run `npx --yes omni-vision-pro@latest doctor`.
+2. Completely restart the client or reload its extension/window.
+3. Open the client's MCP settings and enable/approve `omni-vision-pro`.
+4. For a project config, confirm that the project is trusted.
+5. Check that Node.js is at least 20.10.
+
+### OCR takes too long
+
+The first Tesseract request starts a local worker. Keep client tool timeouts comfortably above 90 seconds; multi-image batches are sequential and may need several minutes.
+
+### An attached image is not found
+
+The resolver tries normal paths, OpenCode cache locations, known clipboard names, and bounded recent system-temp images. Some clients keep pasted bytes only in memory. In that case the client must pass the attachment as an inline image data URL, which `analyze_images` supports directly. No manual file-copy workaround is required.
+
+### Gemini fails with a valid key
+
+Use a currently available model in the private `.env`:
 
 ```env
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-The server also automatically falls back from the requested legacy `gemini-1.5-flash` model when the API reports it unavailable.
+Cloud errors and exhausted quota should still fall back to local OCR.
 
-### JSON configuration errors
+### The code or ZIP tool says the path is outside the allowed roots
 
-Check commas and quotation marks carefully. JSON does not allow comments. On Windows, use forward slashes in file paths or double every backslash.
+The default boundary is the MCP server working directory. Add the intended project folder to `OMNI_ALLOWED_ROOTS`, restart the client, and try again. Do not use a drive root or your entire home directory unless that broad access is genuinely intended.
 
-## Build and verify
+### A config file was changed unexpectedly
+
+The installer creates timestamped backups before changing existing OpenCode/Cursor JSON or JSONC. It refuses to replace a same-name entry that it does not recognize as installer-owned. Restore the reported backup, then run `doctor`.
+
+## Local source checkout
+
+From this repository:
 
 ```bash
+npm install
 npm run check
 npm run build
 ```
 
-The server uses standard MCP over `stdio`. Protocol messages use stdout exclusively; operational diagnostics are written to stderr so they cannot corrupt MCP traffic.
+To test a local checkout, use a manual client entry that points directly to the built CLI:
+
+```text
+node C:/full/path/to/omni-vision-pro/dist/cli.js serve
+```
+
+For example, an OpenCode project entry on Windows is:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "omni-vision-pro": {
+      "type": "local",
+      "command": [
+        "node",
+        "C:/full/path/to/omni-vision-pro/dist/cli.js",
+        "serve"
+      ],
+      "enabled": true,
+      "timeout": 120000
+    }
+  }
+}
+```
+
+Use an absolute path. Forward slashes avoid JSON backslash escaping on Windows.
+
+## Privacy summary
+
+- Gemini mode sends a resized copy of each image to Google.
+- OpenAI mode sends a resized low-detail copy of each image to OpenAI.
+- Tesseract mode processes images locally.
+- Source and ZIP contents are read locally by this server and are not sent directly to the vision providers.
+- The MCP host may include returned text in its own model context under that host's privacy policy.
+- Absolute host paths are redacted from normal output unless `OMNI_INCLUDE_ABSOLUTE_PATHS=true` is explicitly configured.
+
+## Development verification
+
+```bash
+npm run check
+npm run build
+npm pack --dry-run
+npm audit --omit=dev
+```
+
+Protocol messages use stdout exclusively. Operational diagnostics use stderr so they cannot corrupt MCP `stdio` traffic.
