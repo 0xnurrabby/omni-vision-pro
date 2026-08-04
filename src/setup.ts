@@ -99,8 +99,12 @@ function commandEnvironment(command: string): NodeJS.ProcessEnv {
   // OMNI_SETUP_HOME is a hard isolation boundary for installer tests and
   // managed deployments. Keep CLIs away from the real user's configuration.
   const executable = basename(command).toLowerCase().replace(/\.(?:cmd|exe|ps1)$/u, "");
-  if (executable === "codex") environment.CODEX_HOME = join(getSetupHome(), ".codex");
-  if (executable === "claude") environment.CLAUDE_CONFIG_DIR = getSetupHome();
+  if (executable === "codex" && !environment.CODEX_HOME?.trim()) {
+    environment.CODEX_HOME = join(getSetupHome(), ".codex");
+  }
+  if (executable === "claude" && !environment.CLAUDE_CONFIG_DIR?.trim()) {
+    environment.CLAUDE_CONFIG_DIR = getSetupHome();
+  }
   return environment;
 }
 
@@ -402,8 +406,12 @@ function isOwnedInvocation(command: unknown, args: unknown, runtime?: RuntimeCom
   if (stem === SERVER_NAME && (stringArgs.length === 0 || (stringArgs.length === 1 && stringArgs[0] === "serve"))) return true;
   if (stem === "npx") {
     const meaningful = stringArgs.filter((arg) => arg !== "-y" && arg !== "--yes");
-    const packageIndex = meaningful.findIndex((arg) => arg === SERVER_NAME || arg.startsWith(`${SERVER_NAME}@`));
-    return packageIndex >= 0 && meaningful.slice(packageIndex + 1).every((arg) => arg === "serve");
+    const packageToken = meaningful[0] ?? "";
+    const versionedPackage = packageToken.startsWith(`${SERVER_NAME}@`)
+      && packageToken.length > SERVER_NAME.length + 1
+      && !/[\\/\s]/u.test(packageToken.slice(SERVER_NAME.length + 1));
+    const isPackageToken = packageToken === SERVER_NAME || versionedPackage;
+    return isPackageToken && meaningful.slice(1).every((arg) => arg === "serve");
   }
   return false;
 }
@@ -466,7 +474,7 @@ async function mergeOpenCode(runtime: RuntimeCommand, scope: ScopeName): Promise
     type: "local",
     command: [runtime.command, ...runtime.args],
     enabled: true,
-    timeout: 120000,
+    timeout: 600000,
   });
   const backup = await writeJsonDocument(document);
   return `${document.path}${backup ? ` (backup: ${basename(backup)})` : document.existed ? " (already current)" : ""}`;
@@ -519,19 +527,6 @@ function parseCodexInvocation(raw: string): { command: unknown; args: unknown } 
   return { command: transport.command, args: transport.args ?? [] };
 }
 
-function parseClaudeInvocation(raw: string): { command: unknown; args: unknown } | null {
-  const commandMatch = raw.match(/^\s*Command:\s*(.+?)\s*$/imu)
-    ?? raw.match(/^\s*URL:\s*(.+?)\s*$/imu);
-  if (!commandMatch?.[1]) return null;
-  const argsMatch = raw.match(/^\s*Args:\s*(.*?)\s*$/imu);
-  const rawArgs = argsMatch?.[1]?.trim() ?? "";
-  const managedEntryMatch = rawArgs.match(/^(.*[\\/]cli\.js)\s+serve$/iu);
-  const args = managedEntryMatch?.[1]
-    ? [managedEntryMatch[1], "serve"]
-    : rawArgs.split(/\s+/u).filter(Boolean);
-  return { command: commandMatch[1].trim(), args };
-}
-
 async function inspectCodexEntry(runtime?: RuntimeCommand): Promise<EntryInspection> {
   if (!executableExists("codex")) return { exists: false, owned: false, detail: "CLI not installed" };
   const result = await runCommand("codex", ["mcp", "get", SERVER_NAME, "--json"], 30_000);
@@ -547,26 +542,14 @@ async function inspectCodexEntry(runtime?: RuntimeCommand): Promise<EntryInspect
   return { exists: true, owned, detail: owned ? "configured" : "foreign same-name entry" };
 }
 
-async function inspectClaudeEntry(runtime?: RuntimeCommand): Promise<EntryInspection> {
-  if (!executableExists("claude")) return { exists: false, owned: false, detail: "CLI not installed" };
-  const result = await runCommand("claude", ["mcp", "get", SERVER_NAME], 60_000);
-  if (!result.ok) {
-    const message = `${result.stdout} ${result.stderr}`;
-    if (/no mcp server|not found|does not exist|not configured/iu.test(message)) {
-      return { exists: false, owned: false, detail: "entry not configured" };
-    }
-    throw new Error(`Could not inspect the existing Claude Code entry safely: ${sanitizeCommandError(result)}`);
-  }
-  const invocation = parseClaudeInvocation(result.stdout);
-  if (!invocation) {
-    return { exists: true, owned: false, detail: "foreign or unreadable same-name entry" };
-  }
-  const owned = isOwnedInvocation(invocation.command, invocation.args, runtime);
-  return { exists: true, owned, detail: owned ? "configured" : "foreign same-name entry" };
+function claudeConfigPath(scope: ScopeName): string {
+  if (scope === "project") return resolve(process.cwd(), ".mcp.json");
+  const configuredDirectory = process.env.CLAUDE_CONFIG_DIR?.trim();
+  return join(configuredDirectory ? resolve(configuredDirectory) : getSetupHome(), ".claude.json");
 }
 
 async function inspectClaudeConfigFile(scope: ScopeName, runtime?: RuntimeCommand): Promise<EntryInspection> {
-  const path = scope === "project" ? resolve(process.cwd(), ".mcp.json") : join(getSetupHome(), ".claude.json");
+  const path = claudeConfigPath(scope);
   return inspectJsonEntry("claude", path, "mcpServers", runtime);
 }
 
@@ -585,11 +568,7 @@ async function configureCodex(runtime: RuntimeCommand): Promise<string> {
 
 async function configureClaude(runtime: RuntimeCommand, scope: ScopeName): Promise<string> {
   if (!executableExists("claude")) throw new Error("Claude Code CLI was not found.");
-  let existing = await inspectClaudeEntry(runtime);
-  if (scope === "project" && (!existing.exists || !existing.owned)) {
-    const fileEntry = await inspectClaudeConfigFile(scope, runtime);
-    if (fileEntry.exists) existing = fileEntry;
-  }
+  const existing = await inspectClaudeConfigFile(scope, runtime);
   if (existing.exists && !existing.owned) throw collisionError("claude");
   const claudeScope = scope === "user" ? "user" : "project";
   if (existing.exists) {
@@ -626,21 +605,9 @@ async function removeClient(client: ClientName, scope: ScopeName): Promise<boole
   }
   if (client === "claude") {
     if (!executableExists("claude")) return false;
-    let existing = await inspectClaudeEntry();
-    if (scope === "project" && (!existing.exists || !existing.owned)) {
-      const fileEntry = await inspectClaudeConfigFile(scope);
-      if (fileEntry.exists) existing = fileEntry;
-    }
-    let confirmedOwned = existing.exists && existing.owned;
-    if (!existing.exists) {
-      const fileEntry = await inspectClaudeConfigFile(scope);
-      if (!fileEntry.exists) return false;
-      if (!fileEntry.owned) throw collisionError("claude", fileEntry.detail);
-      confirmedOwned = true;
-    } else if (!existing.owned) {
-      throw collisionError("claude");
-    }
-    if (!confirmedOwned) return false;
+    const existing = await inspectClaudeConfigFile(scope);
+    if (!existing.exists) return false;
+    if (!existing.owned) throw collisionError("claude", existing.detail);
     const removed = await runCommand("claude", ["mcp", "remove", "--scope", scope === "user" ? "user" : "project", SERVER_NAME], 30_000);
     if (!removed.ok) throw new Error(sanitizeCommandError(removed));
     return true;
@@ -824,7 +791,7 @@ function escapeEnvValue(value: string): string {
   return JSON.stringify(value).replace(/\\u2028|\\u2029/gu, "");
 }
 
-function setEnvValue(raw: string, key: "GEMINI_API_KEY" | "OPENAI_API_KEY", value: string): string {
+function setEnvValue(raw: string, key: "GEMINI_API_KEY" | "OPENAI_API_KEY" | "OMNI_VISION_PROVIDER", value: string): string {
   const eol = raw.includes("\r\n") ? "\r\n" : "\n";
   const replacement = `${key}=${escapeEnvValue(value)}`;
   const lines = raw ? raw.split(/\r?\n/u) : [];
@@ -852,14 +819,9 @@ async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEn
   const provider = await chooseProvider(options);
   const path = getOmniEnvironmentFile();
 
-  // OCR is deliberately a no-write path: choosing the free mode must never
-  // erase cloud credentials that the user may want on a later run.
-  if (provider === "ocr") {
-    return { provider, path: existsSync(path) ? path : null, changed: false };
-  }
-
   const existed = existsSync(path);
-  let raw = existed ? await readFile(path, "utf8") : [
+  const original = existed ? await readFile(path, "utf8") : "";
+  let raw = existed ? original : [
     "# Private settings for omni-vision-pro. Created by the setup command.",
     "# Existing process/client environment variables still take priority.",
     "",
@@ -870,6 +832,8 @@ async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEn
   } catch {
     throw new Error(`Cannot safely update the private provider settings at ${path}.`);
   }
+
+  raw = setEnvValue(raw, "OMNI_VISION_PROVIDER", provider);
 
   let geminiKey = process.env.GEMINI_API_KEY?.trim() || values.GEMINI_API_KEY?.trim() || "";
   let openaiKey = process.env.OPENAI_API_KEY?.trim() || values.OPENAI_API_KEY?.trim() || "";
@@ -889,7 +853,6 @@ async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEn
     raw = setEnvValue(raw, "OPENAI_API_KEY", openaiKey);
   }
 
-  const original = existed ? await readFile(path, "utf8") : "";
   const changed = !existed || raw !== original;
   if (changed) {
     await mkdir(dirname(path), { recursive: true });
@@ -998,7 +961,7 @@ async function checkClient(client: ClientName, scope: ScopeName, runtime?: Runti
     };
   }
   if (client === "claude") {
-    const status = await inspectClaudeEntry(runtime);
+    const status = await inspectClaudeConfigFile(scope, runtime);
     return {
       configured: status.exists && status.owned,
       detail: status.exists ? status.detail : "not configured",
