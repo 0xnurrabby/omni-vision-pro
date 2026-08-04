@@ -285,8 +285,12 @@ async function pathIsRegularFile(candidate: string): Promise<boolean> {
 
 async function assertAllowedPath(candidate: string, purpose: "image" | "context"): Promise<string> {
   const canonical = await realpath(candidate);
-  if (purpose === "image") return canonical;
-  const roots = allowedRoots ?? [resolve(process.cwd())];
+  // MCP clients commonly launch stdio servers from the client's own install
+  // directory, not from the project or Downloads folder the user selected.
+  // Keep normal absolute paths usable by default; OMNI_ALLOWED_ROOTS remains
+  // the opt-in confinement boundary for managed or shared installations.
+  if (purpose === "image" || allowedRoots === null) return canonical;
+  const roots = allowedRoots;
 
   for (const root of roots) {
     let canonicalRoot: string;
@@ -364,12 +368,17 @@ async function scanRootForImages(root: string, wantedBasename?: string): Promise
     } catch {
       continue;
     }
+    entries.sort((left, right) => {
+      const priority = (name: string): number => /(?:attachment|clipboard|image|media|paste|screenshot|upload)/i.test(name) ? 0 : 1;
+      return priority(left.name) - priority(right.name) || left.name.localeCompare(right.name);
+    });
     for (const entry of entries) {
       inspected += 1;
       if (inspected > CACHE_SCAN_MAX_ENTRIES) break;
       const full = join(current.path, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
+        if (IGNORED_SEGMENTS.has(entry.name.toLowerCase())) continue;
         if (current.depth < CACHE_SCAN_MAX_DEPTH) queue.push({ path: full, depth: current.depth + 1 });
         continue;
       }
@@ -828,7 +837,13 @@ function decodeText(buffer: Buffer): string | null {
 function truncateText(text: string, maxBytes: number): { text: string; truncated: boolean } {
   const encoded = Buffer.from(text, "utf8");
   if (encoded.length <= maxBytes) return { text, truncated: false };
-  return { text: encoded.subarray(0, maxBytes).toString("utf8") + "\n… [truncated]", truncated: true };
+  const marker = "\n… [truncated]";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const contentBudget = maxBytes >= markerBytes ? maxBytes - markerBytes : maxBytes;
+  let end = Math.max(0, Math.min(contentBudget, encoded.length));
+  while (end > 0 && ((encoded[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  const prefix = encoded.subarray(0, end).toString("utf8");
+  return { text: maxBytes >= markerBytes ? prefix + marker : prefix, truncated: true };
 }
 
 async function collectFilesystemContext(inputPath: string, maxFiles: number, maxBytes: number): Promise<{ files: ContextFile[]; skipped: SkipRecord[]; root: string }> {
@@ -858,8 +873,14 @@ async function collectFilesystemContext(inputPath: string, maxFiles: number, max
     const current = queue.shift();
     if (!current) break;
     inspected += 1;
-    const info = await lstat(current);
     const displayPath = rootInfo.isDirectory() ? relative(root, current).replace(/\\/g, "/") || "." : basename(current);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      addSkip({ path: displayPath, reason: `could not inspect file: ${sanitizeError(error)}` });
+      continue;
+    }
 
     if (info.isSymbolicLink()) {
       addSkip({ path: displayPath, reason: "symbolic link" });
@@ -874,7 +895,13 @@ async function collectFilesystemContext(inputPath: string, maxFiles: number, max
       continue;
     }
     if (info.isDirectory()) {
-      const children = await readdir(current, { withFileTypes: true });
+      let children;
+      try {
+        children = await readdir(current, { withFileTypes: true });
+      } catch (error) {
+        addSkip({ path: displayPath, reason: `could not read directory: ${sanitizeError(error)}` });
+        continue;
+      }
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
         if (child.isSymbolicLink()) {
@@ -893,7 +920,13 @@ async function collectFilesystemContext(inputPath: string, maxFiles: number, max
       addSkip({ path: displayPath, reason: `larger than ${formatBytes(MAX_CODE_FILE_BYTES)}` });
       continue;
     }
-    const buffer = await readFile(current);
+    let buffer: Buffer;
+    try {
+      buffer = await readFile(current);
+    } catch (error) {
+      addSkip({ path: displayPath, reason: `could not read file: ${sanitizeError(error)}` });
+      continue;
+    }
     if (looksBinary(buffer, displayPath)) {
       addSkip({ path: displayPath, reason: "binary file" });
       continue;

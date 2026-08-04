@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="190" viewBox="0 0 1200 190" role="img" aria-labelledby="title desc">
+  <title id="title">omni-vision-pro context pipeline</title>
+  <desc id="desc">Images, source files, and ZIP archives are resolved, cleaned, analyzed, and returned as ordered model context.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect x="30" y="37" width="235" height="116" rx="12" fill="#ccfbf1" stroke="#14b8a6" stroke-width="2"/>
+  <text x="148" y="78" text-anchor="middle" fill="#115e59" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">INPUT</text>
+  <text x="148" y="109" text-anchor="middle" fill="#134e4a" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Images, code, ZIPs</text>
+  <text x="148" y="134" text-anchor="middle" fill="#134e4a" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">paths or inline data</text>
+
+  <path d="M275 95H330" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="342" y="37" width="235" height="116" rx="12" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="460" y="78" text-anchor="middle" fill="#1e3a8a" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">PREPARE</text>
+  <text x="460" y="109" text-anchor="middle" fill="#1e40af" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Resolve, resize, filter</text>
+  <text x="460" y="134" text-anchor="middle" fill="#1e40af" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">bounded and read-only</text>
+
+  <path d="M587 95H642" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="654" y="37" width="235" height="116" rx="12" fill="#ede9fe" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="772" y="78" text-anchor="middle" fill="#4c1d95" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">ANALYZE</text>
+  <text x="772" y="109" text-anchor="middle" fill="#5b21b6" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Gemini, OpenAI, OCR</text>
+  <text x="772" y="134" text-anchor="middle" fill="#5b21b6" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">safe fallback by mode</text>
+
+  <path d="M899 95H954" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="966" y="37" width="204" height="116" rx="12" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+  <text x="1068" y="78" text-anchor="middle" fill="#831843" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">CONTEXT</text>
+  <text x="1068" y="109" text-anchor="middle" fill="#9d174d" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Ordered JSON + trees</text>
+  <text x="1068" y="134" text-anchor="middle" fill="#9d174d" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">ready for your model</text>
+</svg>
