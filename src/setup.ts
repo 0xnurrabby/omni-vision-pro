@@ -28,12 +28,25 @@ export type ClientName = "codex" | "opencode" | "claude" | "cursor";
 type ScopeName = "user" | "project";
 type ProviderName = "ocr" | "gemini" | "openai" | "both";
 
+interface ProviderKeys {
+  gemini?: string;
+  openai?: string;
+}
+
+interface ClientDetection {
+  client: ClientName;
+  detected: boolean;
+  configurable: boolean;
+  detail: string;
+}
+
 interface CliOptions {
   clients: ClientName[];
   scope: ScopeName;
   yes: boolean;
   provider: ProviderName;
   providerExplicit: boolean;
+  fromClipboard: boolean;
 }
 
 interface CommandResult {
@@ -237,6 +250,45 @@ function parseProvider(value: string): ProviderName {
   throw new Error("Provider must be ocr, gemini, openai, or both.");
 }
 
+function providerFromClipboardKey(value: string): Exclude<ProviderName, "ocr" | "both"> | null {
+  const key = value.trim();
+  if (/^AIza[0-9A-Za-z_-]{20,}$/u.test(key)) return "gemini";
+  if (/^sk-[0-9A-Za-z_-]{16,}$/u.test(key)) return "openai";
+  return null;
+}
+
+function readClipboardText(): string {
+  const clipboardCommand = platform() === "win32"
+    ? {
+        command: resolveExecutableOnPath("powershell.exe") ?? "powershell.exe",
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
+      }
+    : platform() === "darwin"
+      ? { command: "pbpaste", args: [] }
+      : executableExists("wl-paste")
+        ? { command: "wl-paste", args: ["--no-newline"] }
+        : executableExists("xclip")
+          ? { command: "xclip", args: ["-selection", "clipboard", "-o"] }
+          : null;
+  if (!clipboardCommand) {
+    throw new Error("Clipboard setup needs pbpaste on macOS, or wl-paste/xclip on Linux. You can still run the normal guided setup.");
+  }
+  const result = spawnSync(clipboardCommand.command, clipboardCommand.args, {
+    env: process.env,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 15_000,
+    maxBuffer: 16 * 1024,
+  });
+  if (result.status !== 0 || result.error) throw new Error("The API key could not be read from the clipboard. Copy the key and run the command again.");
+  const value = result.stdout.trim();
+  if (!value) throw new Error("The clipboard is empty. Copy a Gemini or OpenAI API key and run the command again.");
+  if (value.length > 4096 || /[\r\n]/u.test(value)) {
+    throw new Error("The clipboard does not contain a single API key. Copy only the key and run the command again.");
+  }
+  return value;
+}
+
 function nextOptionValue(args: string[], index: number, option: string): string {
   const value = args[index + 1];
   if (!value || value.startsWith("-")) throw new Error(`${option} needs a value.`);
@@ -250,6 +302,7 @@ function parseOptions(args: string[]): CliOptions {
     yes: false,
     provider: "ocr",
     providerExplicit: false,
+    fromClipboard: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -269,6 +322,8 @@ function parseOptions(args: string[]): CliOptions {
     } else if (arg.startsWith("--provider=")) {
       options.provider = parseProvider(arg.slice("--provider=".length));
       options.providerExplicit = true;
+    } else if (arg === "--from-clipboard" || arg === "--clipboard") {
+      options.fromClipboard = true;
     } else if (arg === "--all") options.clients = [...CLIENTS];
     else if (arg === "--gemini-key" || arg === "--openai-key" || arg.startsWith("--gemini-key=") || arg.startsWith("--openai-key=")) {
       throw new Error("API keys are not accepted as command arguments because shell history can expose them. Use an environment variable or the hidden setup prompt.");
@@ -616,13 +671,54 @@ async function removeClient(client: ClientName, scope: ScopeName): Promise<boole
   return removeJsonEntry("cursor", cursorConfigPath(scope), "mcpServers");
 }
 
+function getClientDetections(): ClientDetection[] {
+  const codexCli = executableExists("codex");
+  const codexHome = process.env.CODEX_HOME?.trim()
+    ? resolve(process.env.CODEX_HOME)
+    : join(getSetupHome(), ".codex");
+  const codexDetected = codexCli || existsSync(codexHome);
+
+  const openCodeCli = executableExists("opencode");
+  const openCodeDetected = openCodeCli || existsSync(dirname(openCodeConfigPath("user")));
+
+  const claudeCli = executableExists("claude");
+  const claudeDetected = claudeCli || existsSync(claudeConfigPath("user"));
+
+  const cursorCli = executableExists("cursor");
+  const cursorDetected = cursorCli || existsSync(join(getSetupHome(), ".cursor"));
+
+  return [
+    {
+      client: "codex",
+      detected: codexDetected,
+      configurable: codexCli,
+      detail: codexCli ? "Codex CLI found" : codexDetected ? "Codex settings found; Codex CLI is required for automatic setup" : "Not detected",
+    },
+    {
+      client: "opencode",
+      detected: openCodeDetected,
+      configurable: true,
+      detail: openCodeDetected ? "OpenCode found" : "Not detected; a config can still be prepared",
+    },
+    {
+      client: "claude",
+      detected: claudeDetected,
+      configurable: claudeCli,
+      detail: claudeCli ? "Claude Code CLI found" : claudeDetected ? "Claude settings found; Claude Code CLI is required for automatic setup" : "Not detected",
+    },
+    {
+      client: "cursor",
+      detected: cursorDetected,
+      configurable: true,
+      detail: cursorDetected ? "Cursor found" : "Not detected; a config can still be prepared",
+    },
+  ];
+}
+
 function detectClients(): ClientName[] {
-  const detected: ClientName[] = [];
-  if (executableExists("codex") || existsSync(join(getSetupHome(), ".codex"))) detected.push("codex");
-  if (executableExists("opencode") || existsSync(dirname(openCodeConfigPath("user")))) detected.push("opencode");
-  if (executableExists("claude") || existsSync(join(getSetupHome(), ".claude.json"))) detected.push("claude");
-  if (executableExists("cursor") || existsSync(join(getSetupHome(), ".cursor"))) detected.push("cursor");
-  return detected;
+  return getClientDetections()
+    .filter((item) => item.detected && item.configurable)
+    .map((item) => item.client);
 }
 
 function runtimeForDirectory(directory: string): RuntimeCommand {
@@ -815,8 +911,8 @@ function setEnvValue(raw: string, key: "GEMINI_API_KEY" | "OPENAI_API_KEY" | "OM
   return updated.join(eol);
 }
 
-async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEnvironmentResult> {
-  const provider = await chooseProvider(options);
+async function writeProviderEnvironment(options: CliOptions, providerKeys?: ProviderKeys, providerOverride?: ProviderName): Promise<ProviderEnvironmentResult> {
+  const provider = providerOverride ?? await chooseProvider(options);
   const path = getOmniEnvironmentFile();
 
   const existed = existsSync(path);
@@ -835,8 +931,10 @@ async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEn
 
   raw = setEnvValue(raw, "OMNI_VISION_PROVIDER", provider);
 
-  let geminiKey = process.env.GEMINI_API_KEY?.trim() || values.GEMINI_API_KEY?.trim() || "";
-  let openaiKey = process.env.OPENAI_API_KEY?.trim() || values.OPENAI_API_KEY?.trim() || "";
+  const submittedGeminiKey = providerKeys?.gemini?.trim() || "";
+  const submittedOpenAiKey = providerKeys?.openai?.trim() || "";
+  let geminiKey = submittedGeminiKey || process.env.GEMINI_API_KEY?.trim() || values.GEMINI_API_KEY?.trim() || "";
+  let openaiKey = submittedOpenAiKey || process.env.OPENAI_API_KEY?.trim() || values.OPENAI_API_KEY?.trim() || "";
   if ((provider === "gemini" || provider === "both") && !geminiKey) geminiKey = await readMasked("Paste Gemini API key (hidden): ");
   if ((provider === "openai" || provider === "both") && !openaiKey) openaiKey = await readMasked("Paste OpenAI API key (hidden): ");
   if ((provider === "gemini" || provider === "both") && !geminiKey) {
@@ -846,10 +944,10 @@ async function writeProviderEnvironment(options: CliOptions): Promise<ProviderEn
     throw new Error("OpenAI mode needs OPENAI_API_KEY in your environment or the hidden interactive prompt.");
   }
 
-  if ((provider === "gemini" || provider === "both") && !values.GEMINI_API_KEY) {
+  if ((provider === "gemini" || provider === "both") && (submittedGeminiKey || !values.GEMINI_API_KEY)) {
     raw = setEnvValue(raw, "GEMINI_API_KEY", geminiKey);
   }
-  if ((provider === "openai" || provider === "both") && !values.OPENAI_API_KEY) {
+  if ((provider === "openai" || provider === "both") && (submittedOpenAiKey || !values.OPENAI_API_KEY)) {
     raw = setEnvValue(raw, "OPENAI_API_KEY", openaiKey);
   }
 
@@ -989,7 +1087,24 @@ async function setupCommand(version: string, args: string[]): Promise<void> {
   const options = parseOptions(args);
   const clients = await chooseClients(options);
   if (clients.length === 0) throw new Error("No supported client was detected. Install a client or specify one, for example: setup cursor.");
-  const providerEnvironment = await writeProviderEnvironment(options);
+  let provider: ProviderName;
+  let providerKeys: ProviderKeys | undefined;
+  if (options.fromClipboard) {
+    const key = readClipboardText();
+    const detectedProvider = providerFromClipboardKey(key);
+    if (!detectedProvider) {
+      throw new Error("The clipboard does not look like a Gemini or OpenAI API key. Copy only the key and run the command again.");
+    }
+    if (options.providerExplicit && options.provider !== detectedProvider) {
+      throw new Error(`The copied key looks like ${detectedProvider === "gemini" ? "a Gemini" : "an OpenAI"} key, but --provider ${options.provider} was requested.`);
+    }
+    provider = detectedProvider;
+    providerKeys = detectedProvider === "gemini" ? { gemini: key } : { openai: key };
+  } else {
+    provider = await chooseProvider(options);
+  }
+  console.log("Saving provider settings securely...");
+  const providerEnvironment = await writeProviderEnvironment(options, providerKeys, provider);
   console.log("Installing a private, version-pinned runtime...");
   const runtime = await ensureManagedRuntime(version);
   console.log(`\nOmni Vision Pro ${version}`);
@@ -1012,8 +1127,6 @@ async function setupCommand(version: string, args: string[]): Promise<void> {
   console.log("[OK] Server starts and exposes all tools.");
   if (providerEnvironment.path) {
     console.log(`Private provider settings: ${providerEnvironment.path}${providerEnvironment.changed ? "" : " (unchanged)"}`);
-  } else {
-    console.log("Private provider settings: not needed for OCR mode");
   }
   console.log("\nRestart/open your clients, then ask: \"Use omni-vision-pro to analyze this image.\"");
   if (failures > 0) process.exitCode = 1;
@@ -1076,7 +1189,9 @@ async function uninstallCommand(args: string[]): Promise<void> {
 function printHelp(version: string): void {
   console.log(`omni-vision-pro ${version}\n\n` +
     "One-command setup:\n" +
-    "  npx --yes omni-vision-pro@latest setup --yes\n\n" +
+    "  npx --yes omni-vision-pro@latest setup --yes --provider ocr\n\n" +
+    "Cloud setup from an AI chat (copy the API key first):\n" +
+    "  npx --yes omni-vision-pro@latest setup --yes --from-clipboard\n\n" +
     "Set up one client:\n" +
     "  npx --yes omni-vision-pro@latest setup cursor\n" +
     "  npx --yes omni-vision-pro@latest setup claude-code\n\n" +
@@ -1090,6 +1205,7 @@ function printHelp(version: string): void {
     "  --client codex,opencode,claude,cursor | --all\n" +
     "  --user (default) | --project\n" +
     "  --provider ocr|gemini|openai|both\n" +
+    "  --from-clipboard (read a copied Gemini/OpenAI key without putting it in chat)\n" +
     "  --yes\n\n" +
     "For cloud vision, set GEMINI_API_KEY or OPENAI_API_KEY in your environment,\n" +
     "or run interactive setup and paste it into the hidden prompt.\n");

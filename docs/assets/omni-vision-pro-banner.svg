@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">omni-vision-pro</title>
+  <desc id="desc">Visual, code, and ZIP context for text-only AI models.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07152f"/>
+      <stop offset="0.42" stop-color="#164e8b"/>
+      <stop offset="0.72" stop-color="#6136a6"/>
+      <stop offset="1" stop-color="#a51d68"/>
+    </linearGradient>
+    <linearGradient id="spectrum" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="0.34" stop-color="#60a5fa"/>
+      <stop offset="0.67" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="340" rx="20" fill="url(#background)"/>
+  <rect width="1200" height="340" rx="20" fill="url(#grid)"/>
+
+  <g opacity="0.78" fill="none" stroke="#ffffff">
+    <rect x="854" y="58" width="248" height="166" rx="12" stroke-opacity="0.28" stroke-width="2"/>
+    <path d="M884 100h120M884 128h176M884 156h142M884 184h82" stroke-linecap="round" stroke-opacity="0.45" stroke-width="10"/>
+    <rect x="1018" y="94" width="52" height="52" rx="8" fill="#2dd4bf" fill-opacity="0.72" stroke="none"/>
+    <path d="M1031 120l10 10 18-24" stroke="#07152f" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="76" y="118" fill="#ffffff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="62" font-weight="760">omni-vision-pro</text>
+  <text x="78" y="166" fill="#dbeafe" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="500">Visual, code, and ZIP context for text-only AI models</text>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">
+    <rect x="78" y="208" width="132" height="38" rx="6" fill="#ccfbf1"/>
+    <text x="144" y="233" fill="#115e59" text-anchor="middle">MCP SERVER</text>
+    <rect x="222" y="208" width="145" height="38" rx="6" fill="#dbeafe"/>
+    <text x="294" y="233" fill="#1e40af" text-anchor="middle">VISION + OCR</text>
+    <rect x="379" y="208" width="133" height="38" rx="6" fill="#ede9fe"/>
+    <text x="446" y="233" fill="#5b21b6" text-anchor="middle">CODE + ZIP</text>
+    <rect x="524" y="208" width="138" height="38" rx="6" fill="#fce7f3"/>
+    <text x="593" y="233" fill="#9d174d" text-anchor="middle">LOCAL-FIRST</text>
+  </g>
+
+  <path d="M0 294C172 258 322 324 502 295C683 266 831 254 1200 295V340H0Z" fill="#ffffff" fill-opacity="0.13"/>
+  <path d="M0 312C207 283 371 345 582 308C799 270 987 304 1200 280V340H0Z" fill="url(#spectrum)" fill-opacity="0.9"/>
+</svg>

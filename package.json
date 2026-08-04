@@ -1,6 +1,6 @@
 {
   "name": "omni-vision-pro",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Production-grade MCP server for ordered image analysis, code context, and safe ZIP inspection.",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,7 +10,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "docs"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
