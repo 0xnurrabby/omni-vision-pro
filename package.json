@@ -6,7 +6,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "omni-vision-pro": "./dist/index.js"
+    "omni-vision-pro": "dist/index.js"
   },
   "files": [
     "dist",
@@ -30,6 +30,17 @@
     "claude-desktop"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xnurrabby/omni-vision-pro.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xnurrabby/omni-vision-pro/issues"
+  },
+  "homepage": "https://github.com/0xnurrabby/omni-vision-pro#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@google/genai": "^2.15.0",
     "@modelcontextprotocol/sdk": "^1.30.0",

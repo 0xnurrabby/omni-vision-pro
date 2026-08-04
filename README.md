@@ -98,13 +98,14 @@ Additional protections include:
 - binary-content detection in addition to extension checks;
 - strict UTF-8 validation;
 - no filesystem symlink traversal;
-- maximum file count, per-file size, and aggregate output limits;
+- maximum scan count, file count, per-file size, aggregate output, and diagnostic limits;
 - ZIP path traversal, drive path, UNC path, control character, duplicate path, encryption, and symlink rejection;
-- ZIP entry, inflated-size, aggregate-size, and compression-ratio limits;
+- ZIP entry, bounded-inflation, CRC-32, aggregate-size, and compression-ratio limits;
+- malformed, multi-disk, and ZIP64 archive rejection;
 - no nested archive expansion; and
 - no ZIP extraction to disk.
 
-For a stricter filesystem boundary, configure `OMNI_ALLOWED_ROOTS`. Code and ZIP tools will only read paths inside those roots. Images are exempt so OpenCode/system temporary attachments can still resolve.
+By default, code and ZIP tools can read only inside the MCP server's current working directory. Images are exempt because OpenCode/system temporary attachments must still resolve. To allow other project folders, configure `OMNI_ALLOWED_ROOTS`; code and ZIP tools will then read only inside the listed roots.
 
 Windows uses semicolons between roots:
 
@@ -124,11 +125,9 @@ OMNI_ALLOWED_ROOTS=/Users/you/Projects:/Volumes/Work
 - An MCP-compatible desktop/editor client.
 - Optional: a Gemini or OpenAI API key. No key is needed for OCR-only mode.
 
-## Install from npm after publishing
+## Install from npm
 
-This workspace contains a complete npm package, but building it here does not publish it to the npm registry. The `npx` examples below become usable after you publish `omni-vision-pro`. To use these files immediately, follow **Use a local source checkout** below and use its absolute `dist/index.js` configuration.
-
-After publication, you normally do not need a global installation. The configuration examples below use `npx`, which downloads and launches the package automatically.
+You normally do not need a global installation. The configuration examples below use `npx`, which downloads and launches the package automatically.
 
 For repeatable/offline startup after an initial install, you can instead run:
 
@@ -138,7 +137,7 @@ npm install --global omni-vision-pro
 
 Then use `omni-vision-pro` as the client command.
 
-## Configure OpenCode after npm publication
+## Configure OpenCode
 
 Create `opencode.json` in your project folder. You can instead use the global OpenCode configuration at `~/.config/opencode/opencode.json`.
 
@@ -205,7 +204,7 @@ opencode mcp list
 
 For project-local `.env` loading, set OpenCode's `cwd` to the folder containing `.env`, or put the key in the `environment` object as shown above. Client environment configuration is the most reliable choice for desktop applications.
 
-## Configure Claude Desktop after npm publication
+## Configure Claude Desktop
 
 Open Claude Desktop, go to **Settings → Developer → Edit Config**, and add one of the configurations below.
 
@@ -308,7 +307,7 @@ Forward slashes work in Windows JSON and avoid backslash escaping mistakes.
 
 ## Use `.env`
 
-The server loads `.env` from its current working directory and, for a local package checkout, the package root. Existing environment variables always take priority.
+The server loads `.env` from its current working directory and, for a local package checkout, the package root. Existing environment variables always take priority. For safety, only documented `GEMINI_*`, `OPENAI_API_KEY`, `OMNI_*`, and OpenCode cache-location settings are accepted from `.env`; unrelated entries are ignored.
 
 Example:
 
@@ -386,6 +385,7 @@ Use omni-vision-pro to inspect C:/Downloads/source-bundle.zip without extracting
 - OpenAI mode transmits a resized copy of each image to OpenAI.
 - Tesseract mode keeps OCR processing on the local machine.
 - Source files and ZIP contents are read locally and are not automatically sent to Gemini or OpenAI by this server. The MCP client/model may still include returned tool text in its own model context according to that client's privacy policy.
+- Absolute host paths are redacted from tool output by default. Set `OMNI_INCLUDE_ABSOLUTE_PATHS=true` only if the consuming model genuinely needs them.
 
 ## Troubleshooting
 
