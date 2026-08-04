@@ -167,9 +167,26 @@ function envInteger(name: string, fallback: number, minimum: number, maximum: nu
 }
 
 function loadEnvironment(): void {
-  // Earlier files win because values are filled only when the process does not
-  // already define them: process > project > private Omni config > package.
-  const candidates = [resolve(process.cwd(), ".env"), getOmniEnvironmentFile(), resolve(PACKAGE_ROOT, ".env")];
+  // API keys and general settings retain the established precedence:
+  // process > project > private Omni config > package. Provider-manager
+  // commands own the private provider mode, so that one setting resolves as
+  // private Omni config > process > project > package.
+  const privateEnvironmentFile = getOmniEnvironmentFile();
+  let privateProvider: string | undefined;
+  let privateProviderPresent = false;
+  if (existsSync(privateEnvironmentFile)) {
+    try {
+      const parsed = dotenv.parse(readFileSync(privateEnvironmentFile));
+      if (Object.prototype.hasOwnProperty.call(parsed, "OMNI_VISION_PROVIDER")) {
+        privateProvider = parsed.OMNI_VISION_PROVIDER;
+        privateProviderPresent = true;
+      }
+    } catch {
+      // The normal candidate loop handles unreadable optional environment files.
+    }
+  }
+
+  const candidates = [resolve(process.cwd(), ".env"), privateEnvironmentFile, resolve(PACKAGE_ROOT, ".env")];
   const seen = new Set<string>();
   for (const candidate of candidates) {
     if (seen.has(candidate) || !existsSync(candidate)) continue;
@@ -182,6 +199,9 @@ function loadEnvironment(): void {
     } catch {
       // A malformed optional .env must never prevent the MCP server from starting.
     }
+  }
+  if (privateProviderPresent) {
+    process.env.OMNI_VISION_PROVIDER = privateProvider ?? "";
   }
 }
 
