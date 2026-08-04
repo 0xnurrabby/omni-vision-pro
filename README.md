@@ -17,6 +17,7 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> &nbsp;|&nbsp;
   <a href="#what-it-does">What it does</a> &nbsp;|&nbsp;
+  <a href="#provider-controls">AI controls</a> &nbsp;|&nbsp;
   <a href="#manual-client-setup">Manual setup</a> &nbsp;|&nbsp;
   <a href="#privacy-and-safety">Privacy</a>
 </p>
@@ -25,42 +26,68 @@
 
 ## Quick start
 
-You need Node.js 20.10 or newer. No API key is required for local OCR.
+You need Node.js 20.10 or newer. Install the MCP server once; local OCR works immediately without an API key.
 
-### Free local setup from an AI chat
+### 1. Install once from an AI chat
 
 Paste this command into Codex, OpenCode, Claude Code, or Cursor chat and ask it to run it:
 
 ```bash
-npx --yes omni-vision-pro@latest setup --yes --provider ocr
+npx --yes omni-vision-pro@latest setup --yes
 ```
 
-That one command detects supported clients, installs a private pinned runtime, writes the MCP configuration, and verifies all three tools. Images stay local in OCR mode.
+That one command detects supported clients, installs a private version-pinned runtime, writes the MCP configuration, and verifies all three tools. Setup is now finished; you do not need to install or configure the MCP server again when you add an API key later.
 
-### Gemini or OpenAI setup from an AI chat
-
-1. Copy your Gemini or OpenAI API key to the clipboard.
-2. Paste this single command into the AI chat and ask it to run it:
-
-```bash
-npx --yes omni-vision-pro@latest setup --yes --from-clipboard
-```
-
-The installer recognizes the copied key, selects Gemini or OpenAI automatically, saves it in Omni's private `.env`, configures detected clients, and runs an MCP health check.
-
-The key is never placed in chat text, command arguments, shell history, or client JSON/TOML. Clipboard mode reads only a value that looks like a Gemini or OpenAI key and never prints it.
-
-> Windows and macOS clipboard support works out of the box. Linux needs `wl-paste` or `xclip`.
-
-After setup, restart or reload the client and ask:
+Restart or reload the AI client once, then ask:
 
 ```text
 Use omni-vision-pro to analyze this screenshot. Return the visible text, UI hierarchy, layout, colors, interactions, accessibility issues, and reusable components.
 ```
 
-### Guided terminal setup
+With no cloud key, images are processed locally with Tesseract OCR.
 
-If you prefer prompts in the terminal, run:
+### 2. Add Gemini or OpenAI later - optional
+
+Open PowerShell or a terminal and run:
+
+```bash
+npx --yes omni-vision-pro@latest provider
+```
+
+The simple menu lets you choose Gemini or OpenAI and paste the key into a hidden prompt. Saving a key selects that provider immediately. Restart or reload the AI client, and Omni will use AI vision first with automatic local OCR fallback.
+
+The same menu can add, replace, or remove keys; switch between Gemini and OpenAI; show the current status; or turn AI off and back on. It never changes the MCP client configuration, so setup remains a one-time job.
+
+### Add a key safely from an AI chat
+
+Copy only a Gemini or OpenAI key to the clipboard, then ask the AI chat to run:
+
+```bash
+npx --yes omni-vision-pro@latest provider set --from-clipboard
+```
+
+Omni recognizes the provider, stores the key in its private settings, and selects it. The key is never placed in chat text, command arguments, shell history, or client JSON/TOML.
+
+> Windows and macOS clipboard support works out of the box. Linux needs `wl-paste` or `xclip`.
+
+You can also control AI from the chat without exposing a key:
+
+```bash
+# Keep saved keys, but process images locally with OCR
+npx --yes omni-vision-pro@latest provider off
+
+# Turn AI back on and use any configured provider
+npx --yes omni-vision-pro@latest provider on
+
+# Show the active mode and which keys are configured
+npx --yes omni-vision-pro@latest provider status
+```
+
+Restart or reload the AI client after changing provider settings.
+
+### Run the first setup yourself
+
+For a guided client selection prompt, run:
 
 ```bash
 npx --yes omni-vision-pro@latest setup
@@ -71,8 +98,6 @@ Check the result at any time:
 ```bash
 npx --yes omni-vision-pro@latest doctor
 ```
-
-For a manual cloud setup, run `npx --yes omni-vision-pro@latest setup --provider gemini`, `--provider openai`, or `--provider both`. The terminal key prompt is hidden. You can also edit the private `.env` directly in [Private settings](#private-settings).
 
 <img src="docs/assets/context-pipeline.svg" alt="Input files are resolved and prepared, sent through the selected vision provider or OCR fallback, and returned as ordered context" width="100%">
 
@@ -88,7 +113,7 @@ For a manual cloud setup, run `npx --yes omni-vision-pro@latest setup --provider
 | Code context | A clean file tree followed by safe text contents from a file or directory. |
 | ZIP context | In-memory ZIP inspection without extracting files to disk. |
 | Local measurements | Resized dimensions, dominant color, and a compact palette measured with `sharp`. |
-| Safe fallback | Gemini or OpenAI failures fall back to local Tesseract OCR according to the selected provider mode. |
+| Automatic vision | Local OCR works by default. Add a Gemini or OpenAI key later to enable AI vision; cloud failures fall back to OCR. |
 
 No special image folder is required. If a client has the image bytes only in memory, pass an inline `data:image/...;base64,...` reference.
 
@@ -107,16 +132,25 @@ No special image folder is required. If a client has the image bytes only in mem
 
 <img src="docs/assets/section-divider.svg" alt="" width="100%">
 
-## Vision providers
+## Provider controls
 
-Choose a mode during setup. The selected mode is stored as `OMNI_VISION_PROVIDER`, so an OCR choice stays local even when an old cloud key remains stored for later use.
+Client setup and vision-provider settings are separate. Install the MCP server once, then change providers whenever you want without reinstalling it.
 
-| Mode | Key | Order | Best for |
-| --- | :---: | --- | --- |
-| `ocr` | No | Tesseract only | Private, free text extraction. |
-| `gemini` | Gemini | Gemini, then Tesseract | UI and layout JSON with a local fallback. |
-| `openai` | OpenAI | `gpt-4o-mini`, then Tesseract | Low-detail, cost-conscious UI context. |
-| `both` | Both | Gemini, OpenAI, then Tesseract | The strongest cloud fallback chain. |
+| Current setting | Processing order | What it means |
+| --- | --- | --- |
+| No API key | Tesseract OCR | Free local text extraction works immediately. |
+| `auto` | Configured Gemini, configured OpenAI, then OCR | Uses every available fallback automatically. |
+| `gemini` | Gemini, then OCR | Prefer Gemini and keep local OCR as the safe fallback. |
+| `openai` | `gpt-4o-mini`, then OCR | Prefer low-detail OpenAI vision and keep local OCR as the safe fallback. |
+| `ocr` / AI off | Tesseract OCR only | Never calls Gemini or OpenAI, even when keys remain saved. |
+
+Run the friendly terminal menu at any time:
+
+```bash
+npx --yes omni-vision-pro@latest provider
+```
+
+Adding or replacing a key selects that provider. Turning AI off keeps the keys for later; turning it back on does not require pasting them again. If a cloud request fails, reaches quota, or becomes unavailable, the image is retried with local OCR instead of crashing the MCP server.
 
 ### OpenAI image handling
 
@@ -325,7 +359,7 @@ Completely quit and reopen Claude Desktop after saving.
 
 | Data | Where it goes |
 | --- | --- |
-| OCR mode | Processed locally with Tesseract. |
+| No key or AI off | Processed locally with Tesseract. Saved keys are not used. |
 | Gemini mode | A resized image is sent to Google. |
 | OpenAI mode | A resized low-detail image is sent to OpenAI. |
 | Code and ZIP context | Read locally and returned to the MCP host; not sent directly to vision providers. |
@@ -348,35 +382,50 @@ Returned source and archive contents are marked as untrusted data. The consuming
 
 ## Private settings
 
-The setup command stores provider settings here:
+Most users should use `npx --yes omni-vision-pro@latest provider`. If you prefer manual configuration, provider settings are stored here:
 
-- Windows: `%APPDATA%\\omni-vision-pro\\.env`
+- Windows: `%APPDATA%\omni-vision-pro\.env`
 - macOS/Linux: `${XDG_CONFIG_HOME:-~/.config}/omni-vision-pro/.env`
 
-Create the file if it does not exist, then add only the mode you want.
-
-OpenAI:
+Create the file if it does not exist. The easiest setup is one line for the provider you want:
 
 ```env
-OMNI_VISION_PROVIDER=openai
+GEMINI_API_KEY=your_gemini_key
+```
+
+or:
+
+```env
 OPENAI_API_KEY=your_openai_key
 ```
 
-Gemini:
+Save the file and restart the AI client. With no `OMNI_VISION_PROVIDER` line, automatic mode is used: a saved key enables AI vision and local OCR remains the final fallback.
+
+If both keys are saved, automatic mode tries Gemini, then OpenAI, then local OCR. You can make that choice explicit:
+
+```env
+OMNI_VISION_PROVIDER=auto
+```
+
+Prefer one saved provider before OCR:
 
 ```env
 OMNI_VISION_PROVIDER=gemini
-GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Free local OCR:
+or:
+
+```env
+OMNI_VISION_PROVIDER=openai
+```
+
+Force free local OCR while keeping saved keys:
 
 ```env
 OMNI_VISION_PROVIDER=ocr
 ```
 
-Use `OMNI_VISION_PROVIDER=both` and store both keys when you want Gemini, then OpenAI, then OCR fallback. Never pass API keys as command arguments. The CLI rejects key flags because shell history and process lists can expose them.
+Never pass API keys as command arguments. Use the hidden terminal prompt, clipboard import, environment variables, or this private file. The CLI rejects key flags because shell history and process lists can expose them.
 
 Useful optional controls:
 
@@ -390,7 +439,7 @@ Useful optional controls:
 | `OMNI_CLOUD_TIMEOUT_MS` | Cloud request timeout, default `30000`. |
 | `OMNI_OCR_TIMEOUT_MS` | OCR request timeout, default `90000`. |
 
-The server also accepts a project `.env`, but process variables take priority and only allowlisted settings are loaded.
+The server also accepts a project `.env`, and only allowlisted settings are loaded. Omni's private provider mode is authoritative so `provider off` stays reliable. For API keys and other settings, process variables keep the highest priority, followed by the project and private `.env` files.
 
 <img src="docs/assets/section-divider.svg" alt="" width="100%">
 
@@ -398,7 +447,9 @@ The server also accepts a project `.env`, but process variables take priority an
 
 | Symptom | Try this |
 | --- | --- |
-| Clipboard setup cannot find the key | Copy only the Gemini/OpenAI key, then run `npx --yes omni-vision-pro@latest setup --yes --from-clipboard` again. |
+| Clipboard import cannot find the key | Copy only the Gemini/OpenAI key, then run `npx --yes omni-vision-pro@latest provider set --from-clipboard` again. |
+| A key was added but OCR is still active | Run `npx --yes omni-vision-pro@latest provider status`, then `npx --yes omni-vision-pro@latest provider on`, and restart/reload the AI client. |
+| The wrong AI provider is being used | Run `npx --yes omni-vision-pro@latest provider`, choose the provider you want, then restart/reload the AI client. |
 | The client cannot find `npx` | Install Node.js 20.10+, restart the client, or replace `npx` with its full path such as `C:\\Program Files\\nodejs\\npx.cmd`. |
 | The server is installed but not visible | Run `npx --yes omni-vision-pro@latest doctor`, restart/reload the client, then approve the server or project trust prompt. |
 | An image attachment is not found | Attach the image in the same request, or pass its inline data URL. No special copy folder is needed. |
@@ -410,6 +461,41 @@ The server also accepts a project `.env`, but process variables take priority an
 <img src="docs/assets/section-divider.svg" alt="" width="100%">
 
 ## Advanced commands
+
+<details>
+<summary><strong>Provider and API-key controls</strong></summary>
+
+```bash
+# Open the beginner-friendly menu
+npx --yes omni-vision-pro@latest provider
+
+# Check the active mode without revealing keys
+npx --yes omni-vision-pro@latest provider status
+
+# Add or replace a key through a hidden terminal prompt
+npx --yes omni-vision-pro@latest provider set gemini
+npx --yes omni-vision-pro@latest provider replace openai
+
+# Import a copied key without putting it in shell history
+npx --yes omni-vision-pro@latest provider set --from-clipboard
+
+# Choose how configured providers are used
+npx --yes omni-vision-pro@latest provider use gemini
+npx --yes omni-vision-pro@latest provider use openai
+npx --yes omni-vision-pro@latest provider use auto
+
+# Temporarily use local OCR, then turn AI back on
+npx --yes omni-vision-pro@latest provider off
+npx --yes omni-vision-pro@latest provider on
+
+# Remove keys from Omni's private settings
+npx --yes omni-vision-pro@latest provider remove gemini
+npx --yes omni-vision-pro@latest provider remove openai
+npx --yes omni-vision-pro@latest provider remove all
+```
+
+`set` and `replace` both save the new key and select that provider. `off` retains private credentials; `remove` deletes them from Omni's private settings. Keys set separately in process variables or a project `.env` must be removed from that source. Restart or reload the AI client after a change.
+</details>
 
 <details>
 <summary><strong>Doctor and uninstall</strong></summary>

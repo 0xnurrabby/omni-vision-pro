@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import { parse as parseDotenv } from "dotenv";
 import {
   applyEdits,
@@ -26,7 +27,8 @@ import {
 
 export type ClientName = "codex" | "opencode" | "claude" | "cursor";
 type ScopeName = "user" | "project";
-type ProviderName = "ocr" | "gemini" | "openai" | "both";
+type ProviderName = "auto" | "ocr" | "gemini" | "openai" | "both";
+type CloudProviderName = "gemini" | "openai";
 
 interface ProviderKeys {
   gemini?: string;
@@ -86,8 +88,27 @@ interface RuntimeInspection {
 
 interface ProviderEnvironmentResult {
   provider: ProviderName;
-  path: string | null;
+  path: string;
   changed: boolean;
+}
+
+interface ProviderEnvironmentState {
+  path: string;
+  existed: boolean;
+  raw: string;
+  values: Record<string, string>;
+  provider: ProviderName;
+}
+
+interface EffectiveProviderKeyState {
+  available: boolean;
+  source: string;
+}
+
+interface EffectiveProviderEnvironment {
+  provider: ProviderName;
+  providerSource: string;
+  keys: Record<CloudProviderName, EffectiveProviderKeyState>;
 }
 
 interface EntryInspection {
@@ -97,6 +118,7 @@ interface EntryInspection {
 }
 
 const SERVER_NAME = PACKAGE_NAME;
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLIENTS: ClientName[] = ["codex", "opencode", "claude", "cursor"];
 const JSON_FORMAT_DEFAULTS: FormattingOptions = {
   insertSpaces: true,
@@ -245,12 +267,13 @@ function parseClients(value: string): ClientName[] {
 
 function parseProvider(value: string): ProviderName {
   const provider = value.trim().toLowerCase();
+  if (provider === "auto" || provider === "automatic") return "auto";
   if (provider === "ocr" || provider === "tesseract" || provider === "local") return "ocr";
   if (provider === "gemini" || provider === "openai" || provider === "both") return provider;
-  throw new Error("Provider must be ocr, gemini, openai, or both.");
+  throw new Error("Provider must be auto, ocr, gemini, openai, or both.");
 }
 
-function providerFromClipboardKey(value: string): Exclude<ProviderName, "ocr" | "both"> | null {
+function providerFromClipboardKey(value: string): CloudProviderName | null {
   const key = value.trim();
   if (/^AIza[0-9A-Za-z_-]{20,}$/u.test(key)) return "gemini";
   if (/^sk-[0-9A-Za-z_-]{16,}$/u.test(key)) return "openai";
@@ -300,7 +323,7 @@ function parseOptions(args: string[]): CliOptions {
     clients: [],
     scope: "user",
     yes: false,
-    provider: "ocr",
+    provider: "auto",
     providerExplicit: false,
     fromClipboard: false,
   };
@@ -845,42 +868,35 @@ async function chooseClients(options: CliOptions): Promise<ClientName[]> {
 
 async function readMasked(question: string): Promise<string> {
   if (!input.isTTY || !output.isTTY) return "";
-  return new Promise((resolvePromise) => {
+  return new Promise((resolvePromise, rejectPromise) => {
     output.write(question);
     input.resume();
     input.setRawMode?.(true);
     let value = "";
     let completed = false;
-    const finish = (): void => {
+    const finish = (error?: Error): void => {
       if (completed) return;
       completed = true;
       input.off("data", onData);
+      input.off("error", onError);
       input.setRawMode?.(false);
       input.pause();
       output.write("\n");
-      resolvePromise(value.trim());
+      if (error) rejectPromise(error);
+      else resolvePromise(value.trim());
     };
+    const onError = (): void => finish(new Error("API key entry was interrupted."));
     const onData = (chunk: Buffer): void => {
       for (const char of chunk.toString()) {
         if (char === "\r" || char === "\n") { finish(); return; }
-        if (char === "\u0003") { process.exitCode = 130; finish(); return; }
+        if (char === "\u0003") { finish(new Error("API key entry cancelled.")); return; }
         if (char === "\u007f" || char === "\b") value = value.slice(0, -1);
         else value += char;
       }
     };
     input.on("data", onData);
+    input.on("error", onError);
   });
-}
-
-async function chooseProvider(options: CliOptions): Promise<ProviderName> {
-  if (options.providerExplicit || options.yes || !input.isTTY || !output.isTTY) return options.provider;
-  const rl = createInterface({ input, output });
-  try {
-    const answer = (await rl.question("Vision mode: [1] Free OCR, [2] Gemini, [3] OpenAI, [4] Both (default 1): ")).trim();
-    return ({ "2": "gemini", "3": "openai", "4": "both" } as const)[answer] ?? "ocr";
-  } finally {
-    rl.close();
-  }
 }
 
 function escapeEnvValue(value: string): string {
@@ -911,23 +927,141 @@ function setEnvValue(raw: string, key: "GEMINI_API_KEY" | "OPENAI_API_KEY" | "OM
   return updated.join(eol);
 }
 
-async function writeProviderEnvironment(options: CliOptions, providerKeys?: ProviderKeys, providerOverride?: ProviderName): Promise<ProviderEnvironmentResult> {
-  const provider = providerOverride ?? await chooseProvider(options);
-  const path = getOmniEnvironmentFile();
+function removeEnvValue(raw: string, key: "GEMINI_API_KEY" | "OPENAI_API_KEY"): string {
+  const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+  const expression = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`, "u");
+  const lines = raw.split(/\r?\n/u).filter((line) => !expression.test(line));
+  while (lines.length > 1 && lines[lines.length - 1] === "" && lines[lines.length - 2] === "") lines.pop();
+  return lines.join(eol);
+}
 
+async function readProviderEnvironmentState(): Promise<ProviderEnvironmentState> {
+  const path = getOmniEnvironmentFile();
   const existed = existsSync(path);
-  const original = existed ? await readFile(path, "utf8") : "";
-  let raw = existed ? original : [
-    "# Private settings for omni-vision-pro. Created by the setup command.",
-    "# Existing process/client environment variables still take priority.",
+  const raw = existed ? await readFile(path, "utf8") : [
+    "# Private settings for omni-vision-pro.",
+    "# Keys stay here and are never copied into MCP client configuration files.",
     "",
   ].join("\n");
-  let values: Record<string, string> = {};
+  let values: Record<string, string>;
   try {
     values = parseDotenv(raw);
   } catch {
     throw new Error(`Cannot safely update the private provider settings at ${path}.`);
   }
+  let provider: ProviderName = "auto";
+  if (values.OMNI_VISION_PROVIDER?.trim()) {
+    try {
+      provider = parseProvider(values.OMNI_VISION_PROVIDER);
+    } catch {
+      throw new Error(`OMNI_VISION_PROVIDER in ${path} is invalid. Use auto, ocr, gemini, openai, or both.`);
+    }
+  }
+  return { path, existed, raw, values, provider };
+}
+
+function readOptionalProviderEnvironment(path: string): Record<string, string> {
+  if (!existsSync(path)) return {};
+  try {
+    return parseDotenv(readFileSync(path, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function resolveEffectiveProviderEnvironment(state: ProviderEnvironmentState): EffectiveProviderEnvironment {
+  type ProviderEnvironmentName = "OMNI_VISION_PROVIDER" | "GEMINI_API_KEY" | "OPENAI_API_KEY";
+  interface CandidateEnvironment { values: Record<string, string | undefined>; source: string }
+  const firstValue = (name: ProviderEnvironmentName, candidates: CandidateEnvironment[]): { value?: string; source: string } => {
+    for (const candidate of candidates) {
+      if (candidate.values[name] !== undefined) return { value: candidate.values[name], source: candidate.source };
+    }
+    return { source: "not set" };
+  };
+
+  const fileCandidates = [
+    { path: resolve(process.cwd(), ".env"), source: "project .env" },
+    { path: resolve(PACKAGE_ROOT, ".env"), source: "package .env" },
+  ] as const;
+  const seen = new Set([resolve(state.path)]);
+  const loadedFiles: CandidateEnvironment[] = [];
+  for (const candidate of fileCandidates) {
+    const path = resolve(candidate.path);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    loadedFiles.push({ values: readOptionalProviderEnvironment(path), source: candidate.source });
+  }
+
+  const processCandidate: CandidateEnvironment = { values: process.env, source: "process environment" };
+  const privateCandidate: CandidateEnvironment = { values: state.values, source: "private settings" };
+  const projectCandidate = loadedFiles.find((candidate) => candidate.source === "project .env");
+  const packageCandidate = loadedFiles.find((candidate) => candidate.source === "package .env");
+  const providerSetting = firstValue("OMNI_VISION_PROVIDER", [
+    privateCandidate,
+    processCandidate,
+    ...(projectCandidate ? [projectCandidate] : []),
+    ...(packageCandidate ? [packageCandidate] : []),
+  ]);
+  const keyCandidates = [
+    processCandidate,
+    ...(projectCandidate ? [projectCandidate] : []),
+    privateCandidate,
+    ...(packageCandidate ? [packageCandidate] : []),
+  ];
+  const geminiKey = firstValue("GEMINI_API_KEY", keyCandidates);
+  const openaiKey = firstValue("OPENAI_API_KEY", keyCandidates);
+
+  let provider: ProviderName = "auto";
+  const configuredProvider = providerSetting.value?.trim();
+  if (configuredProvider) {
+    try {
+      provider = parseProvider(configuredProvider);
+    } catch {
+      // The MCP server intentionally treats unknown provider values as auto.
+    }
+  }
+  const keyState = (key: { value?: string; source: string }): EffectiveProviderKeyState => ({
+    available: Boolean(key.value?.trim()),
+    source: key.source,
+  });
+  return {
+    provider,
+    providerSource: providerSetting.source === "not set" ? "default" : providerSetting.source,
+    keys: {
+      gemini: keyState(geminiKey),
+      openai: keyState(openaiKey),
+    },
+  };
+}
+
+async function writeProviderRaw(state: ProviderEnvironmentState, raw: string): Promise<boolean> {
+  if (state.existed && raw === state.raw) return false;
+  await mkdir(dirname(state.path), { recursive: true });
+  const temporary = `${state.path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, raw, { encoding: "utf8", mode: 0o600 });
+    await rename(temporary, state.path);
+    if (platform() !== "win32") await chmod(state.path, 0o600);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  return true;
+}
+
+async function ensureDefaultProviderEnvironment(): Promise<ProviderEnvironmentResult> {
+  const state = await readProviderEnvironmentState();
+  if (Object.prototype.hasOwnProperty.call(state.values, "OMNI_VISION_PROVIDER")) {
+    return { provider: state.provider, path: state.path, changed: false };
+  }
+  const raw = setEnvValue(state.raw, "OMNI_VISION_PROVIDER", "auto");
+  return { provider: "auto", path: state.path, changed: await writeProviderRaw(state, raw) };
+}
+
+async function writeProviderEnvironment(options: CliOptions, providerKeys?: ProviderKeys, providerOverride?: ProviderName): Promise<ProviderEnvironmentResult> {
+  const provider = providerOverride ?? options.provider;
+  const state = await readProviderEnvironmentState();
+  let raw = state.raw;
+  const values = state.values;
 
   raw = setEnvValue(raw, "OMNI_VISION_PROVIDER", provider);
 
@@ -943,6 +1077,12 @@ async function writeProviderEnvironment(options: CliOptions, providerKeys?: Prov
   if ((provider === "openai" || provider === "both") && !openaiKey) {
     throw new Error("OpenAI mode needs OPENAI_API_KEY in your environment or the hidden interactive prompt.");
   }
+  if (geminiKey && (provider === "gemini" || provider === "both" || submittedGeminiKey)) {
+    geminiKey = validateProviderKey("gemini", geminiKey);
+  }
+  if (openaiKey && (provider === "openai" || provider === "both" || submittedOpenAiKey)) {
+    openaiKey = validateProviderKey("openai", openaiKey);
+  }
 
   if ((provider === "gemini" || provider === "both") && (submittedGeminiKey || !values.GEMINI_API_KEY)) {
     raw = setEnvValue(raw, "GEMINI_API_KEY", geminiKey);
@@ -951,19 +1091,8 @@ async function writeProviderEnvironment(options: CliOptions, providerKeys?: Prov
     raw = setEnvValue(raw, "OPENAI_API_KEY", openaiKey);
   }
 
-  const changed = !existed || raw !== original;
-  if (changed) {
-    await mkdir(dirname(path), { recursive: true });
-    const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
-    try {
-      await writeFile(temporary, raw, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, path);
-      if (platform() !== "win32") await chmod(path, 0o600);
-    } finally {
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
-  }
-  return { provider, path, changed };
+  const changed = await writeProviderRaw(state, raw);
+  return { provider, path: state.path, changed };
 }
 
 function handshakeError(prefix: string, stderr: string): Error {
@@ -1077,17 +1206,244 @@ async function checkClient(client: ClientName, scope: ScopeName, runtime?: Runti
 }
 
 function providerLabel(provider: ProviderName): string {
+  if (provider === "auto") return "Automatic: use a saved AI key, otherwise free local OCR";
   if (provider === "ocr") return "Free local OCR";
   if (provider === "gemini") return "Gemini vision with automatic OCR fallback";
   if (provider === "openai") return "OpenAI vision with automatic OCR fallback";
   return "Gemini first, OpenAI backup, then local OCR fallback";
 }
 
+function cloudProviderLabel(provider: CloudProviderName): string {
+  return provider === "gemini" ? "Gemini" : "OpenAI";
+}
+
+function providerKeyName(provider: CloudProviderName): "GEMINI_API_KEY" | "OPENAI_API_KEY" {
+  return provider === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+}
+
+function providerHasKey(state: EffectiveProviderEnvironment, provider: CloudProviderName): boolean {
+  return state.keys[provider].available;
+}
+
+function validateProviderKey(provider: CloudProviderName, value: string): string {
+  const key = value.trim();
+  if (!key || key.length > 4096 || /[\r\n\s]/u.test(key)) {
+    throw new Error("The API key must be one non-empty line without spaces.");
+  }
+  if (provider === "gemini" && !/^AIza[0-9A-Za-z_-]{20,}$/u.test(key)) {
+    throw new Error("That does not look like a Gemini API key. Copy only the key that starts with AIza.");
+  }
+  if (provider === "openai" && !/^sk-[0-9A-Za-z_-]{16,}$/u.test(key)) {
+    throw new Error("That does not look like an OpenAI API key. Copy only the key that starts with sk-.");
+  }
+  return key;
+}
+
+async function ask(question: string): Promise<string> {
+  if (!input.isTTY || !output.isTTY) return "";
+  const rl = createInterface({ input, output });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function chooseCloudProvider(question = "Choose provider: [1] Gemini, [2] OpenAI: "): Promise<CloudProviderName> {
+  const answer = await ask(question);
+  if (answer === "1" || answer.toLowerCase() === "gemini") return "gemini";
+  if (answer === "2" || answer.toLowerCase() === "openai") return "openai";
+  throw new Error("Choose 1 for Gemini or 2 for OpenAI.");
+}
+
+async function setProviderKey(provider: CloudProviderName | undefined, fromClipboard: boolean): Promise<void> {
+  let selected = provider;
+  let key = "";
+  if (fromClipboard) {
+    key = readClipboardText();
+    const detected = providerFromClipboardKey(key);
+    if (!detected) throw new Error("The clipboard does not contain a recognizable Gemini or OpenAI API key.");
+    if (selected && selected !== detected) {
+      throw new Error(`The copied key looks like ${cloudProviderLabel(detected)}, not ${cloudProviderLabel(selected)}.`);
+    }
+    selected = detected;
+  } else {
+    selected ??= await chooseCloudProvider();
+    key = await readMasked(`Paste ${cloudProviderLabel(selected)} API key (hidden): `);
+  }
+  if (!selected) throw new Error("Choose Gemini or OpenAI before saving a key.");
+  key = validateProviderKey(selected, key);
+
+  const state = await readProviderEnvironmentState();
+  let raw = setEnvValue(state.raw, providerKeyName(selected), key);
+  raw = setEnvValue(raw, "OMNI_VISION_PROVIDER", selected);
+  await writeProviderRaw(state, raw);
+  console.log(`[OK] ${cloudProviderLabel(selected)} key saved privately and selected.`);
+  console.log("Restart your AI client once. Cloud vision will then run automatically, with local OCR as fallback.");
+}
+
+async function useProvider(provider: ProviderName): Promise<void> {
+  const state = await readProviderEnvironmentState();
+  const effective = resolveEffectiveProviderEnvironment(state);
+  if (provider === "gemini" && !providerHasKey(effective, "gemini")) {
+    throw new Error(`No Gemini key is available. Run '${SERVER_NAME} provider set gemini' first.`);
+  }
+  if (provider === "openai" && !providerHasKey(effective, "openai")) {
+    throw new Error(`No OpenAI key is available. Run '${SERVER_NAME} provider set openai' first.`);
+  }
+  if (provider === "both" && (!providerHasKey(effective, "gemini") || !providerHasKey(effective, "openai"))) {
+    throw new Error("Both mode needs both Gemini and OpenAI keys. Add the missing key first, or use auto mode.");
+  }
+  if (provider === "auto" && !providerHasKey(effective, "gemini") && !providerHasKey(effective, "openai")) {
+    console.log("[INFO] No AI key is saved yet. Auto mode will use free local OCR until a key is added.");
+  }
+  const raw = setEnvValue(state.raw, "OMNI_VISION_PROVIDER", provider);
+  await writeProviderRaw(state, raw);
+  console.log(`[OK] Vision mode: ${providerLabel(provider)}.`);
+  if (provider === "ocr") console.log("Saved API keys were kept. In OCR-only mode, no cloud provider is called.");
+  console.log("Restart your AI client once for this change to take effect.");
+}
+
+async function removeProviderKey(target: CloudProviderName | "all"): Promise<void> {
+  const state = await readProviderEnvironmentState();
+  let raw = state.raw;
+  const hadPrivateKey = target === "all"
+    ? Boolean(state.values.GEMINI_API_KEY?.trim() || state.values.OPENAI_API_KEY?.trim())
+    : Boolean(state.values[providerKeyName(target)]?.trim());
+  if (target === "all" || target === "gemini") raw = removeEnvValue(raw, "GEMINI_API_KEY");
+  if (target === "all" || target === "openai") raw = removeEnvValue(raw, "OPENAI_API_KEY");
+
+  let nextProvider = state.provider;
+  if (nextProvider !== "ocr" && (target === "all" || nextProvider === target || nextProvider === "both")) {
+    nextProvider = "auto";
+    raw = setEnvValue(raw, "OMNI_VISION_PROVIDER", nextProvider);
+  }
+  await writeProviderRaw(state, raw);
+  const label = target === "all" ? "Gemini and OpenAI keys" : `${cloudProviderLabel(target)} key`;
+  console.log(`${hadPrivateKey ? "[OK]" : "[INFO]"} ${label}: ${hadPrivateKey ? "removed from private settings" : "not saved in private settings"}.`);
+  const updatedValues = parseDotenv(raw);
+  const effective = resolveEffectiveProviderEnvironment({ ...state, raw, values: updatedValues, provider: nextProvider });
+  const remainingSources = (["gemini", "openai"] as const)
+    .filter((provider) => (target === "all" || target === provider) && effective.keys[provider].available)
+    .map((provider) => `${cloudProviderLabel(provider)} (${effective.keys[provider].source})`);
+  if (remainingSources.length > 0) {
+    console.log(`[INFO] Credentials remain available outside private settings: ${remainingSources.join(", ")}. Remove them from those sources separately if needed.`);
+  }
+  console.log("Restart your AI client once for this change to take effect.");
+}
+
+async function printProviderStatus(): Promise<void> {
+  const state = await readProviderEnvironmentState();
+  const effective = resolveEffectiveProviderEnvironment(state);
+  const effectiveMode = effective.provider;
+  const keyStatus = (provider: CloudProviderName): string => {
+    const key = effective.keys[provider];
+    return key.available ? `available from ${key.source}` : "not set";
+  };
+  const hasGemini = providerHasKey(effective, "gemini");
+  const hasOpenAi = providerHasKey(effective, "openai");
+  const selectedKeyAvailable = effectiveMode === "auto" || effectiveMode === "both"
+    ? hasGemini || hasOpenAi
+    : effectiveMode === "gemini" ? hasGemini : effectiveMode === "openai" ? hasOpenAi : false;
+  const aiStatus = effectiveMode === "ocr"
+    ? "OFF (local OCR only)"
+    : selectedKeyAvailable ? "ON" : "OFF (no usable API key; local OCR active)";
+  console.log("Omni Vision Pro provider status\n");
+  console.log(`AI: ${aiStatus}`);
+  console.log(`Mode: ${providerLabel(effectiveMode)} (from ${effective.providerSource})`);
+  console.log(`Gemini key: ${keyStatus("gemini")}`);
+  console.log(`OpenAI key: ${keyStatus("openai")}`);
+  console.log(`Private settings: ${state.path}${state.existed ? "" : " (will be created when settings change)"}`);
+  console.log("API key values are intentionally never displayed.");
+}
+
+async function interactiveProviderCommand(): Promise<void> {
+  if (!input.isTTY || !output.isTTY) return printProviderStatus();
+  await printProviderStatus();
+  console.log("\nWhat do you want to do?");
+  console.log("  [1] Add or replace a Gemini key");
+  console.log("  [2] Add or replace an OpenAI key");
+  console.log("  [3] Change the active AI provider");
+  console.log("  [4] Turn AI off (use local OCR)");
+  console.log("  [5] Turn AI on (automatic)");
+  console.log("  [6] Remove a saved API key");
+  console.log("  [0] Exit");
+  const answer = await ask("Select: ");
+  if (answer === "0" || !answer) return;
+  if (answer === "1") return setProviderKey("gemini", false);
+  if (answer === "2") return setProviderKey("openai", false);
+  if (answer === "4") return useProvider("ocr");
+  if (answer === "5") return useProvider("auto");
+  if (answer === "3") {
+    const mode = await ask("Use: [1] Auto, [2] Gemini, [3] OpenAI, [4] Gemini + OpenAI: ");
+    const provider = ({ "1": "auto", "2": "gemini", "3": "openai", "4": "both" } as const)[mode];
+    if (!provider) throw new Error("Choose 1, 2, 3, or 4.");
+    return useProvider(provider);
+  }
+  if (answer === "6") {
+    const target = await ask("Remove: [1] Gemini, [2] OpenAI, [3] All saved keys: ");
+    const provider = ({ "1": "gemini", "2": "openai", "3": "all" } as const)[target];
+    if (!provider) throw new Error("Choose 1, 2, or 3.");
+    return removeProviderKey(provider);
+  }
+  throw new Error("Choose one of the displayed menu numbers.");
+}
+
+async function providerCommand(args: string[]): Promise<void> {
+  if (args.length === 0) return interactiveProviderCommand();
+  const fromClipboard = args.includes("--from-clipboard") || args.includes("--clipboard");
+  const positional = args.filter((arg) => !["--from-clipboard", "--clipboard", "--yes", "-y"].includes(arg));
+  const unknownOption = positional.find((arg) => arg.startsWith("-"));
+  if (unknownOption) throw new Error(`Unknown provider option: ${unknownOption}`);
+  if (positional.length > 2) throw new Error(`Unexpected provider argument: ${positional[2]}`);
+  const action = positional[0]?.toLowerCase();
+  const target = positional[1]?.toLowerCase();
+  if (!action && fromClipboard) return setProviderKey(undefined, true);
+  if (!action) return interactiveProviderCommand();
+  if (fromClipboard && action !== "set" && action !== "add" && action !== "replace") {
+    throw new Error("--from-clipboard can only be used with provider set, add, or replace.");
+  }
+  if (action === "menu") {
+    if (target) throw new Error("Provider menu does not accept another argument.");
+    return interactiveProviderCommand();
+  }
+  if (action === "status" || action === "show") {
+    if (target) throw new Error("Provider status does not accept another argument.");
+    return printProviderStatus();
+  }
+  if (action === "set" || action === "add" || action === "replace") {
+    const provider = target ? parseProvider(target) : undefined;
+    if (provider && provider !== "gemini" && provider !== "openai") throw new Error("A key can only be set for Gemini or OpenAI.");
+    return setProviderKey(provider, fromClipboard);
+  }
+  if (action === "use" || action === "switch") {
+    if (!target) throw new Error("Choose auto, gemini, openai, both, or ocr.");
+    return useProvider(parseProvider(target));
+  }
+  if (action === "off" || action === "disable") {
+    if (target) throw new Error("Provider off does not accept another argument.");
+    return useProvider("ocr");
+  }
+  if (action === "on" || action === "enable") {
+    const provider = target ? parseProvider(target) : "auto";
+    if (provider === "ocr") throw new Error("Use 'provider off' for OCR-only mode.");
+    return useProvider(provider);
+  }
+  if (action === "remove" || action === "delete") {
+    if (!target) throw new Error("Choose gemini, openai, or all.");
+    if (target === "all") return removeProviderKey("all");
+    const provider = parseProvider(target);
+    if (provider !== "gemini" && provider !== "openai") throw new Error("Choose gemini, openai, or all.");
+    return removeProviderKey(provider);
+  }
+  throw new Error(`Unknown provider action: ${action}. Use status, set, use, on, off, or remove.`);
+}
+
 async function setupCommand(version: string, args: string[]): Promise<void> {
   const options = parseOptions(args);
   const clients = await chooseClients(options);
   if (clients.length === 0) throw new Error("No supported client was detected. Install a client or specify one, for example: setup cursor.");
-  let provider: ProviderName;
+  let provider: ProviderName | undefined;
   let providerKeys: ProviderKeys | undefined;
   if (options.fromClipboard) {
     const key = readClipboardText();
@@ -1100,11 +1456,11 @@ async function setupCommand(version: string, args: string[]): Promise<void> {
     }
     provider = detectedProvider;
     providerKeys = detectedProvider === "gemini" ? { gemini: key } : { openai: key };
-  } else {
-    provider = await chooseProvider(options);
   }
   console.log("Saving provider settings securely...");
-  const providerEnvironment = await writeProviderEnvironment(options, providerKeys, provider);
+  const providerEnvironment = provider || options.providerExplicit
+    ? await writeProviderEnvironment(options, providerKeys, provider)
+    : await ensureDefaultProviderEnvironment();
   console.log("Installing a private, version-pinned runtime...");
   const runtime = await ensureManagedRuntime(version);
   console.log(`\nOmni Vision Pro ${version}`);
@@ -1129,6 +1485,7 @@ async function setupCommand(version: string, args: string[]): Promise<void> {
     console.log(`Private provider settings: ${providerEnvironment.path}${providerEnvironment.changed ? "" : " (unchanged)"}`);
   }
   console.log("\nRestart/open your clients, then ask: \"Use omni-vision-pro to analyze this image.\"");
+  console.log("To add or change AI later, run: omni-vision-pro provider");
   if (failures > 0) process.exitCode = 1;
 }
 
@@ -1189,14 +1546,15 @@ async function uninstallCommand(args: string[]): Promise<void> {
 function printHelp(version: string): void {
   console.log(`omni-vision-pro ${version}\n\n` +
     "One-command setup:\n" +
-    "  npx --yes omni-vision-pro@latest setup --yes --provider ocr\n\n" +
-    "Cloud setup from an AI chat (copy the API key first):\n" +
-    "  npx --yes omni-vision-pro@latest setup --yes --from-clipboard\n\n" +
+    "  npx --yes omni-vision-pro@latest setup --yes\n\n" +
+    "Add a cloud key from an AI chat (copy the API key first):\n" +
+    "  npx --yes omni-vision-pro@latest provider set --from-clipboard\n\n" +
     "Set up one client:\n" +
     "  npx --yes omni-vision-pro@latest setup cursor\n" +
     "  npx --yes omni-vision-pro@latest setup claude-code\n\n" +
     "Commands:\n" +
     "  setup       Auto-detect and configure Codex, OpenCode, Claude Code, and Cursor\n" +
+    "  provider    Add/remove keys, switch Gemini/OpenAI, or turn AI off (OCR-only)\n" +
     "  doctor      Inspect the installed runtime and client configurations\n" +
     "  uninstall   Remove only installer-owned omni-vision-pro client entries\n" +
     "  serve       Start the MCP stdio server (used by clients)\n\n" +
@@ -1204,15 +1562,23 @@ function printHelp(version: string): void {
     "  [codex|opencode|claude-code|cursor|all]\n" +
     "  --client codex,opencode,claude,cursor | --all\n" +
     "  --user (default) | --project\n" +
-    "  --provider ocr|gemini|openai|both\n" +
+    "  --provider auto|ocr|gemini|openai|both (setup default: auto)\n" +
     "  --from-clipboard (read a copied Gemini/OpenAI key without putting it in chat)\n" +
     "  --yes\n\n" +
-    "For cloud vision, set GEMINI_API_KEY or OPENAI_API_KEY in your environment,\n" +
-    "or run interactive setup and paste it into the hidden prompt.\n");
+    "Provider shortcuts:\n" +
+    "  omni-vision-pro provider                 guided terminal menu\n" +
+    "  omni-vision-pro provider set gemini      paste a key privately\n" +
+    "  omni-vision-pro provider set openai      paste a key privately\n" +
+    "  omni-vision-pro provider use gemini|openai|auto|both\n" +
+    "  omni-vision-pro provider on [gemini|openai|auto|both]\n" +
+    "  omni-vision-pro provider off             OCR-only mode\n" +
+    "  omni-vision-pro provider remove gemini|openai|all\n" +
+    "  omni-vision-pro provider status\n");
 }
 
 export async function runSetupCli(command: string, version: string, args: string[]): Promise<void> {
   if (command === "setup") return setupCommand(version, args);
+  if (command === "provider" || command === "providers" || command === "ai") return providerCommand(args);
   if (command === "doctor") return doctorCommand(version, args);
   if (command === "uninstall" || command === "remove") return uninstallCommand(args);
   if (command === "help" || command === "--help" || command === "-h") return printHelp(version);
