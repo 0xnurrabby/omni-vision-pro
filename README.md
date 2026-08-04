@@ -19,7 +19,7 @@ node --version
 npm --version
 ```
 
-Run the guided installer:
+Run the guided installer (this is the only command most people need):
 
 ```bash
 npx --yes omni-vision-pro@latest setup
@@ -30,7 +30,7 @@ The installer:
 - detects Codex, OpenCode, Claude Code, and Cursor;
 - asks which clients to configure;
 - lets you choose free local OCR, Gemini, OpenAI, or both cloud providers;
-- stores cloud keys in one private Omni settings file instead of copying them into every client config;
+- stores cloud keys and the selected provider mode in one private Omni settings file instead of copying them into every client config;
 - installs a private, version-pinned runtime;
 - preserves unrelated client settings and backs up JSON/JSONC files before changing them; and
 - starts the MCP server and verifies that all three tools are discoverable.
@@ -38,14 +38,13 @@ The installer:
 ### Copy and paste this into an AI coding chat
 
 ```text
-Run this for me, then run its doctor:
+Run this one command for me:
 npx --yes omni-vision-pro@latest setup --yes --provider ocr
-npx --yes omni-vision-pro@latest doctor
 
 Do not change unrelated MCP entries or put API keys in commands or JSON files. Tell me which apps I need to restart and where I need to approve the MCP server.
 ```
 
-That instruction selects the free, fully local OCR mode. To enable Gemini or OpenAI, run the guided setup yourself so the key can be entered through its hidden prompt.
+That instruction selects the free, fully local OCR mode—even if an older private settings file contains cloud keys. To enable Gemini or OpenAI, run the guided setup yourself so the key can be entered through its hidden prompt.
 
 ## Choose the vision mode
 
@@ -254,7 +253,7 @@ Add this to a project `opencode.json`/`opencode.jsonc`, or to the user config at
         "serve"
       ],
       "enabled": true,
-      "timeout": 120000
+      "timeout": 600000
     }
   }
 }
@@ -316,7 +315,7 @@ claude mcp get omni-vision-pro
 
 [Add omni-vision-pro to Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=omni-vision-pro&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyItLXllcyIsIm9tbmktdmlzaW9uLXByb0BsYXRlc3QiLCJzZXJ2ZSJdfQ==)
 
-Cursor will show the decoded MCP configuration before installation. Review it and approve only if it launches `npx --yes omni-vision-pro@latest serve`. The one-click link installs the MCP entry; it does not add a cloud API key, so it starts in local OCR mode unless the private Omni settings file already contains a key.
+Cursor will show the decoded MCP configuration before installation. Review it and approve only if it launches `npx --yes omni-vision-pro@latest serve`. The one-click link installs only the MCP entry; it does not change provider settings. A fresh install with no keys uses local OCR. If cloud settings already exist, run `setup --provider ocr` to force local-only mode.
 
 #### Manual Cursor configuration
 
@@ -400,13 +399,15 @@ Guided setup stores keys in a dedicated `.env` file:
 Example:
 
 ```env
-# Choose either or both. Gemini is tried first when both are present.
+# Setup writes this selection. Valid values: ocr, gemini, openai, both.
+OMNI_VISION_PROVIDER=both
+# Keys may remain stored while OCR mode is selected; disabled providers are not called.
 GEMINI_API_KEY=your_gemini_key
 GEMINI_MODEL=gemini-2.5-flash
 OPENAI_API_KEY=your_openai_key
 ```
 
-The server also reads a `.env` in its working directory, but only documented Gemini, OpenAI key, Omni, and OpenCode cache variables are accepted. Unrelated provider transport variables are ignored or removed so a project cannot redirect API requests or enable SDK debug logging.
+The server also reads a `.env` in its working directory, but only documented Gemini, OpenAI key, Omni (including `OMNI_VISION_PROVIDER`), and OpenCode cache variables are accepted. Unrelated provider transport variables are ignored or removed so a project cannot redirect API requests or enable SDK debug logging.
 
 Security rules:
 
@@ -414,7 +415,7 @@ Security rules:
 - Prefer the installer's hidden key prompt.
 - Restrict access to the private `.env`. Setup uses mode `0600` on macOS/Linux; Windows inherits the account directory's ACLs.
 - Rotate a key immediately if it appears in terminal history, logs, a repository, or a shared configuration.
-- Cloud modes upload the resized image to the selected provider. OCR mode keeps image processing local.
+- Cloud modes upload the resized image to the selected provider. OCR mode keeps image processing local and disables cloud providers even when their keys remain stored for a later switch.
 
 To erase retained credentials after uninstalling, delete only the private `.env` listed above. The managed runtime cache is stored under:
 
@@ -578,7 +579,7 @@ For example, an OpenCode project entry on Windows is:
         "serve"
       ],
       "enabled": true,
-      "timeout": 120000
+      "timeout": 600000
     }
   }
 }

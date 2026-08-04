@@ -42,6 +42,7 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const ENV_ALLOWLIST = new Set([
   "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_FALLBACK_MODEL", "OPENAI_API_KEY",
+  "OMNI_VISION_PROVIDER",
   "OMNI_ALLOWED_ROOTS", "OMNI_INCLUDE_ABSOLUTE_PATHS", "OMNI_MAX_IMAGES", "OMNI_MAX_IMAGE_BYTES",
   "OMNI_MAX_IMAGE_PIXELS", "OMNI_MAX_CODE_FILES", "OMNI_MAX_CODE_FILE_BYTES", "OMNI_MAX_CONTEXT_BYTES",
   "OMNI_MAX_ARCHIVE_BYTES", "OMNI_MAX_ZIP_ENTRIES", "OMNI_MAX_ZIP_ENTRY_BYTES", "OMNI_MAX_ZIP_TOTAL_BYTES",
@@ -95,6 +96,7 @@ const SENSITIVE_EXACT_NAMES = new Set([
 const SENSITIVE_EXTENSIONS = new Set([".key", ".p12", ".pem", ".pfx"]);
 
 type ProviderName = "Gemini" | "OpenAI" | "Tesseract" | "Unavailable";
+type ProviderMode = "ocr" | "gemini" | "openai" | "both" | "auto";
 
 interface PreparedImage {
   buffer: Buffer;
@@ -141,6 +143,22 @@ interface SkipRecord {
 const allowedRoots = getAllowedRoots();
 let imageQueue: Promise<void> = Promise.resolve();
 let geminiLegacyModelUnavailable = false;
+
+function providerMode(): ProviderMode {
+  const configured = process.env.OMNI_VISION_PROVIDER?.trim().toLowerCase();
+  if (configured === "ocr" || configured === "gemini" || configured === "openai" || configured === "both") {
+    return configured;
+  }
+  return "auto";
+}
+
+function providerEnabled(provider: "Gemini" | "OpenAI"): boolean {
+  const mode = providerMode();
+  if (mode === "ocr") return false;
+  if (mode === "gemini") return provider === "Gemini";
+  if (mode === "openai") return provider === "OpenAI";
+  return true;
+}
 
 function envInteger(name: string, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -688,7 +706,7 @@ async function analyzePreparedImage(
 ): Promise<ImageAnalysisResult> {
   const attempts: ProviderAttempt[] = [];
 
-  if (process.env.GEMINI_API_KEY && !disabledProviders.has("Gemini")) {
+  if (providerEnabled("Gemini") && process.env.GEMINI_API_KEY && !disabledProviders.has("Gemini")) {
     try {
       const analysis = await analyzeWithGemini(image, prompt);
       attempts.push({ provider: "Gemini", status: "success" });
@@ -699,10 +717,13 @@ async function analyzePreparedImage(
       if (isBatchFatalProviderError(reason)) disabledProviders.add("Gemini");
     }
   } else {
-    attempts.push({ provider: "Gemini", status: "skipped", reason: process.env.GEMINI_API_KEY ? "Disabled after a batch-level provider failure" : "No API key" });
+    const reason = !providerEnabled("Gemini")
+      ? `Disabled by OMNI_VISION_PROVIDER=${providerMode()}`
+      : process.env.GEMINI_API_KEY ? "Disabled after a batch-level provider failure" : "No API key";
+    attempts.push({ provider: "Gemini", status: "skipped", reason });
   }
 
-  if (process.env.OPENAI_API_KEY && !disabledProviders.has("OpenAI")) {
+  if (providerEnabled("OpenAI") && process.env.OPENAI_API_KEY && !disabledProviders.has("OpenAI")) {
     try {
       const analysis = await analyzeWithOpenAI(image, prompt);
       attempts.push({ provider: "OpenAI", status: "success" });
@@ -713,7 +734,10 @@ async function analyzePreparedImage(
       if (isBatchFatalProviderError(reason)) disabledProviders.add("OpenAI");
     }
   } else {
-    attempts.push({ provider: "OpenAI", status: "skipped", reason: process.env.OPENAI_API_KEY ? "Disabled after a batch-level provider failure" : "No API key" });
+    const reason = !providerEnabled("OpenAI")
+      ? `Disabled by OMNI_VISION_PROVIDER=${providerMode()}`
+      : process.env.OPENAI_API_KEY ? "Disabled after a batch-level provider failure" : "No API key";
+    attempts.push({ provider: "OpenAI", status: "skipped", reason });
   }
 
   try {
