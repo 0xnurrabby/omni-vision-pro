@@ -1,12 +1,12 @@
 {
   "name": "omni-vision-pro",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Production-grade MCP server for ordered image analysis, code context, and safe ZIP inspection.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "omni-vision-pro": "dist/index.js"
+    "omni-vision-pro": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js",
+    "start": "node dist/cli.js serve",
     "prepublishOnly": "npm run build"
   },
   "engines": {
@@ -47,6 +47,7 @@
     "@tesseract.js-data/eng": "^1.0.0",
     "adm-zip": "^0.6.0",
     "dotenv": "^17.4.2",
+    "jsonc-parser": "^3.3.1",
     "openai": "^6.27.0",
     "sharp": "^0.35.3",
     "tesseract.js": "^7.0.0",
