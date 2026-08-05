@@ -36,6 +36,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
+import { detectRuntimeEditor, runtimeEditorLabel, type RuntimeEditor } from "./editor-detection.js";
 import { getOmniEnvironmentFile, PACKAGE_NAME, PACKAGE_VERSION } from "./paths.js";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -48,6 +49,7 @@ const ENV_ALLOWLIST = new Set([
   "OMNI_MAX_ARCHIVE_BYTES", "OMNI_MAX_ZIP_ENTRIES", "OMNI_MAX_ZIP_ENTRY_BYTES", "OMNI_MAX_ZIP_TOTAL_BYTES",
   "OMNI_MAX_ZIP_RATIO", "OMNI_MAX_SCAN_ENTRIES", "OMNI_MAX_SKIP_RECORDS", "OMNI_CLOUD_TIMEOUT_MS",
   "OMNI_OCR_TIMEOUT_MS", "OMNI_CACHE_SCAN_MAX_DEPTH", "OMNI_CACHE_SCAN_MAX_ENTRIES", "OMNI_RECENT_ATTACHMENT_MS",
+  "OMNI_OPENAI_MAX_OUTPUT_TOKENS",
   "OPENCODE_CACHE_DIR", "OPENCODE_DATA_DIR",
 ]);
 const PROVIDER_SDK_ENV_DENYLIST = [
@@ -79,7 +81,8 @@ const CLOUD_TIMEOUT_MS = envInteger("OMNI_CLOUD_TIMEOUT_MS", 30_000, 1000, 180_0
 const OCR_TIMEOUT_MS = envInteger("OMNI_OCR_TIMEOUT_MS", 90_000, 5000, 600_000);
 const CACHE_SCAN_MAX_DEPTH = envInteger("OMNI_CACHE_SCAN_MAX_DEPTH", 5, 1, 10);
 const CACHE_SCAN_MAX_ENTRIES = envInteger("OMNI_CACHE_SCAN_MAX_ENTRIES", 5000, 100, 50_000);
-const RECENT_ATTACHMENT_MS = envInteger("OMNI_RECENT_ATTACHMENT_MS", 30 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000);
+const RECENT_ATTACHMENT_MS = envInteger("OMNI_RECENT_ATTACHMENT_MS", 10 * 60 * 1000, 60_000, 10 * 60 * 1000);
+const OPENAI_MAX_OUTPUT_TOKENS = envInteger("OMNI_OPENAI_MAX_OUTPUT_TOKENS", 600, 128, 700);
 
 const IMAGE_EXTENSIONS = new Set([
   ".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp",
@@ -114,6 +117,22 @@ interface ResolvedImage {
   path?: string;
   buffer?: Buffer;
   strategy: string;
+  mtimeMs?: number;
+}
+
+interface ImageCandidate {
+  path: string;
+  mtimeMs: number;
+}
+
+interface ResolvedImageInput {
+  input: string;
+  resolved: ResolvedImage;
+}
+
+interface ImageResolutionCache {
+  native: Map<string, Promise<ImageCandidate[]>>;
+  universal: Map<string, Promise<ImageCandidate[]>>;
 }
 
 interface ProviderAttempt {
@@ -141,6 +160,7 @@ interface SkipRecord {
 }
 
 const allowedRoots = getAllowedRoots();
+const activeEditor = detectRuntimeEditor();
 let imageQueue: Promise<void> = Promise.resolve();
 let geminiLegacyModelUnavailable = false;
 
@@ -337,30 +357,49 @@ function uniqueExistingRoots(values: Array<string | undefined>): string[] {
   return [...unique];
 }
 
-function getOpenCodeRoots(): string[] {
+function getEditorRoots(editor: RuntimeEditor): string[] {
   const home = homedir();
   const localAppData = process.env.LOCALAPPDATA;
   const appData = process.env.APPDATA;
   const xdgCache = process.env.XDG_CACHE_HOME;
   const xdgData = process.env.XDG_DATA_HOME;
   const xdgRuntime = process.env.XDG_RUNTIME_DIR;
+  if (editor === "opencode" || editor === "codex") {
+    return uniqueExistingRoots([
+      process.env.OPENCODE_CACHE_DIR,
+      process.env.OPENCODE_DATA_DIR,
+      join(tmpdir(), "opencode"),
+      localAppData ? join(localAppData, "Temp", "opencode") : undefined,
+      localAppData ? join(localAppData, "opencode") : undefined,
+      localAppData ? join(localAppData, "OpenCode") : undefined,
+      appData ? join(appData, "opencode") : undefined,
+      appData ? join(appData, "OpenCode") : undefined,
+      xdgCache ? join(xdgCache, "opencode") : undefined,
+      xdgData ? join(xdgData, "opencode") : undefined,
+      xdgRuntime ? join(xdgRuntime, "opencode") : undefined,
+      join(home, ".cache", "opencode"),
+      join(home, ".local", "share", "opencode"),
+      join(home, "Library", "Caches", "opencode"),
+      join(home, "Library", "Caches", "OpenCode"),
+      join(home, "Library", "Application Support", "opencode"),
+      join(home, "Library", "Application Support", "OpenCode"),
+    ]);
+  }
+  if (editor === "claude" || editor === "claude-desktop") {
+    return uniqueExistingRoots([
+      appData ? join(appData, "Claude", "attachments") : undefined,
+      join(tmpdir(), "claude-attachments"),
+      join(home, ".config", "Claude", "attachments"),
+      join(home, ".config", "claude", "attachments"),
+      join(home, "Library", "Application Support", "Claude", "attachments"),
+    ]);
+  }
   return uniqueExistingRoots([
-    process.env.OPENCODE_CACHE_DIR,
-    process.env.OPENCODE_DATA_DIR,
-    join(tmpdir(), "opencode"),
-    localAppData ? join(localAppData, "opencode") : undefined,
-    localAppData ? join(localAppData, "OpenCode") : undefined,
-    appData ? join(appData, "opencode") : undefined,
-    appData ? join(appData, "OpenCode") : undefined,
-    xdgCache ? join(xdgCache, "opencode") : undefined,
-    xdgData ? join(xdgData, "opencode") : undefined,
-    xdgRuntime ? join(xdgRuntime, "opencode") : undefined,
-    join(home, ".cache", "opencode"),
-    join(home, ".local", "share", "opencode"),
-    join(home, "Library", "Caches", "opencode"),
-    join(home, "Library", "Caches", "OpenCode"),
-    join(home, "Library", "Application Support", "opencode"),
-    join(home, "Library", "Application Support", "OpenCode"),
+    join(tmpdir(), "cursor-browser-extension"),
+    join(tmpdir(), "cursor"),
+    join(tmpdir(), "vscode"),
+    editor === "cursor" ? join(home, ".cursor", "attachments") : undefined,
+    editor === "vscode" ? join(home, ".vscode", "attachments") : undefined,
   ]);
 }
 
@@ -374,8 +413,30 @@ function getTempRoots(): string[] {
   ]);
 }
 
-async function scanRootForImages(root: string, wantedBasename?: string): Promise<Array<{ path: string; mtimeMs: number }>> {
-  const matches: Array<{ path: string; mtimeMs: number }> = [];
+function isAttachmentDirectoryName(value: string): boolean {
+  return /(?:attachment|cache|clipboard|codex|cursor|image|media|opencode|paste|screenshot|upload|vscode|claude)/iu.test(value);
+}
+
+function candidateKey(path: string): string {
+  const normalizedPath = resolve(path);
+  return platform() === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+}
+
+function uniqueSortedCandidates(candidates: ImageCandidate[]): ImageCandidate[] {
+  const unique = new Map<string, ImageCandidate>();
+  for (const candidate of candidates) {
+    const key = candidateKey(candidate.path);
+    const existing = unique.get(key);
+    if (!existing || candidate.mtimeMs > existing.mtimeMs) unique.set(key, candidate);
+  }
+  return [...unique.values()].sort((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path));
+}
+
+async function scanRootForImages(
+  root: string,
+  options: { wantedBasename?: string; recentAfterMs: number; attachmentDirectoriesOnly?: boolean },
+): Promise<ImageCandidate[]> {
+  const matches: ImageCandidate[] = [];
   const queue: Array<{ path: string; depth: number }> = [{ path: root, depth: 0 }];
   let inspected = 0;
 
@@ -399,14 +460,16 @@ async function scanRootForImages(root: string, wantedBasename?: string): Promise
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         if (IGNORED_SEGMENTS.has(entry.name.toLowerCase())) continue;
-        if (current.depth < CACHE_SCAN_MAX_DEPTH) queue.push({ path: full, depth: current.depth + 1 });
+        const permittedDirectory = !options.attachmentDirectoriesOnly || current.depth > 0 || isAttachmentDirectoryName(entry.name);
+        if (permittedDirectory && current.depth < CACHE_SCAN_MAX_DEPTH) queue.push({ path: full, depth: current.depth + 1 });
         continue;
       }
       if (!entry.isFile()) continue;
-      if (wantedBasename && entry.name.toLowerCase() !== wantedBasename.toLowerCase()) continue;
-      if (!wantedBasename && !IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
+      if (options.wantedBasename && entry.name.toLowerCase() !== options.wantedBasename.toLowerCase()) continue;
+      if (!options.wantedBasename && !IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
       try {
         const info = await stat(full);
+        if (info.mtimeMs < options.recentAfterMs) continue;
         matches.push({ path: full, mtimeMs: info.mtimeMs });
       } catch {
         // The file may disappear while a cache is being scanned.
@@ -414,6 +477,71 @@ async function scanRootForImages(root: string, wantedBasename?: string): Promise
     }
   }
   return matches;
+}
+
+async function scanRootsForImages(
+  roots: string[],
+  wantedBasename: string | undefined,
+  attachmentDirectoriesOnly = false,
+): Promise<ImageCandidate[]> {
+  const recentAfterMs = Date.now() - RECENT_ATTACHMENT_MS;
+  const values = await Promise.all(roots.map((root) => scanRootForImages(root, {
+    wantedBasename,
+    recentAfterMs,
+    attachmentDirectoriesOnly: attachmentDirectoriesOnly || getTempRoots().some((tempRoot) => candidateKey(tempRoot) === candidateKey(root)),
+  })));
+  return uniqueSortedCandidates(values.flat());
+}
+
+function editorRootsForSearch(editor: RuntimeEditor): string[] {
+  return [
+    ...getEditorRoots(editor),
+    ...(activeEditor.editor === editor && (editor === "cursor" || editor === "vscode") ? getTempRoots() : []),
+  ];
+}
+
+async function scanKnownEditorRoots(editors: RuntimeEditor[], wantedBasename?: string): Promise<ImageCandidate[]> {
+  const candidates: ImageCandidate[] = [];
+  const seenRoots = new Set<string>();
+  for (const editor of editors) {
+    const roots = editorRootsForSearch(editor).filter((root) => {
+      const key = candidateKey(root);
+      if (seenRoots.has(key)) return false;
+      seenRoots.add(key);
+      return true;
+    });
+    candidates.push(...await scanRootsForImages(roots, wantedBasename));
+  }
+  return uniqueSortedCandidates(candidates);
+}
+
+async function nativeAttachmentCandidates(wantedBasename?: string): Promise<ImageCandidate[]> {
+  const editors: RuntimeEditor[] = ["opencode", "codex", "claude", "claude-desktop", "cursor", "vscode"];
+  if (!activeEditor.editor) return scanKnownEditorRoots(editors, wantedBasename);
+  const activeMatches = await scanKnownEditorRoots([activeEditor.editor], wantedBasename);
+  if (activeMatches.length > 0) return activeMatches;
+  return scanKnownEditorRoots(editors.filter((editor) => editor !== activeEditor.editor), wantedBasename);
+}
+
+function cachedCandidates(
+  cache: Map<string, Promise<ImageCandidate[]>>,
+  wantedBasename: string | undefined,
+  loader: () => Promise<ImageCandidate[]>,
+): Promise<ImageCandidate[]> {
+  const key = wantedBasename?.toLowerCase() ?? "*";
+  const existing = cache.get(key);
+  if (existing) return existing;
+  const pending = loader();
+  cache.set(key, pending);
+  return pending;
+}
+
+function cachedNativeAttachmentCandidates(cache: ImageResolutionCache, wantedBasename?: string): Promise<ImageCandidate[]> {
+  return cachedCandidates(cache.native, wantedBasename, () => nativeAttachmentCandidates(wantedBasename));
+}
+
+function cachedUniversalTempCandidates(cache: ImageResolutionCache, wantedBasename?: string): Promise<ImageCandidate[]> {
+  return cachedCandidates(cache.universal, wantedBasename, () => scanRootsForImages(getTempRoots(), wantedBasename, true));
 }
 
 async function verifyImageCandidate(candidate: string): Promise<string | null> {
@@ -429,7 +557,27 @@ async function verifyImageCandidate(candidate: string): Promise<string | null> {
   }
 }
 
-async function resolveImagePath(raw: string): Promise<ResolvedImage> {
+async function firstVerifiedCandidate(
+  candidates: ImageCandidate[],
+  excluded: Set<string>,
+  strategy: string,
+): Promise<ResolvedImage | null> {
+  for (const candidate of candidates) {
+    if (excluded.has(candidateKey(candidate.path))) continue;
+    const verified = await verifyImageCandidate(candidate.path);
+    if (!verified) continue;
+    excluded.add(candidateKey(verified));
+    return { path: verified, mtimeMs: candidate.mtimeMs, strategy };
+  }
+  return null;
+}
+
+function isAutoImageReference(raw: string): boolean {
+  const value = raw.trim();
+  return !value || isGenericAttachmentReference(normalizeInputPath(value));
+}
+
+async function resolveImagePath(raw: string, excluded: Set<string>, cache: ImageResolutionCache): Promise<ResolvedImage> {
   if (/^data:image\/(?:avif|bmp|gif|heic|heif|jpeg|jpg|png|tiff|webp);base64,/i.test(raw.trim())) {
     const comma = raw.indexOf(",");
     const encoded = raw.slice(comma + 1).replace(/\s/g, "");
@@ -456,54 +604,96 @@ async function resolveImagePath(raw: string): Promise<ResolvedImage> {
 
   for (const candidate of directCandidates) {
     const verified = await verifyImageCandidate(candidate);
-    if (verified) return { path: verified, strategy: isAbsolute(requested) ? "absolute path" : "working-directory path" };
+    if (verified) {
+      excluded.add(candidateKey(verified));
+      return { path: verified, strategy: isAbsolute(requested) ? "tier 1: absolute path" : "tier 1: explicit working-directory path" };
+    }
   }
 
   const wantedBasename = basename(requested);
   if (wantedBasename && wantedBasename !== "." && wantedBasename !== sep) {
-    const roots = [...getOpenCodeRoots(), ...getTempRoots()];
-    const matches = (await Promise.all(roots.map((root) => scanRootForImages(root, wantedBasename))))
-      .flat()
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    for (const match of matches) {
-      const verified = await verifyImageCandidate(match.path);
-      if (verified) return { path: verified, strategy: "OpenCode/system temporary cache basename match" };
+    const nativeMatch = await firstVerifiedCandidate(
+      await cachedNativeAttachmentCandidates(cache, wantedBasename),
+      excluded,
+      `tier 2: recent editor attachment basename match${activeEditor.editor ? ` (active ${runtimeEditorLabel(activeEditor.editor)} cache searched first)` : ""}`,
+    );
+    if (nativeMatch) return nativeMatch;
+
+    const universalExactMatch = await firstVerifiedCandidate(
+      await cachedUniversalTempCandidates(cache, wantedBasename),
+      excluded,
+      "tier 3: recent OS temporary/clipboard cache basename match",
+    );
+    if (universalExactMatch) return universalExactMatch;
+  }
+
+  const nativeRecent = await firstVerifiedCandidate(
+    await cachedNativeAttachmentCandidates(cache),
+    excluded,
+    `tier 2: newest recent editor attachment${activeEditor.editor ? ` (active ${runtimeEditorLabel(activeEditor.editor)} cache searched first)` : ""}`,
+  );
+  if (nativeRecent) return nativeRecent;
+
+  const universalRecent = await firstVerifiedCandidate(
+    await cachedUniversalTempCandidates(cache),
+    excluded,
+    "tier 3: newest recent OS temporary/clipboard cache image",
+  );
+  if (universalRecent) return universalRecent;
+
+  const label = wantedBasename && wantedBasename !== "." ? wantedBasename : "latest attachment";
+  throw new Error(`No valid ${label} was found in the explicit input, active editor cache, or the last ${Math.round(RECENT_ATTACHMENT_MS / 60_000)} minutes of OS temporary attachment data`);
+}
+
+async function discoverImageBatch(count: number, cache: ImageResolutionCache): Promise<ResolvedImageInput[]> {
+  const native = await cachedNativeAttachmentCandidates(cache);
+  const universal = native.length >= count ? [] : await cachedUniversalTempCandidates(cache);
+  const candidates = uniqueSortedCandidates([...native, ...universal]);
+  const resolved: ResolvedImageInput[] = [];
+  const excluded = new Set<string>();
+  for (const candidate of candidates) {
+    const value = await firstVerifiedCandidate([candidate], excluded, native.some((item) => candidateKey(item.path) === candidateKey(candidate.path))
+      ? `tier 2: recent editor attachment${activeEditor.editor ? ` (active ${runtimeEditorLabel(activeEditor.editor)} cache searched first)` : ""}`
+      : "tier 3: recent OS temporary/clipboard cache image");
+    if (value) resolved.push({ input: `(auto-detected recent attachment ${resolved.length + 1})`, resolved: value });
+    if (resolved.length >= count) break;
+  }
+  return resolved.sort((left, right) => (left.resolved.mtimeMs ?? 0) - (right.resolved.mtimeMs ?? 0));
+}
+
+async function resolveImageBatch(inputs: string[] | undefined, maxAutoImages: number): Promise<Array<ResolvedImageInput | { input: string; error: Error }>> {
+  const cache: ImageResolutionCache = { native: new Map(), universal: new Map() };
+  if (!inputs || inputs.length === 0) {
+    const discovered = await discoverImageBatch(maxAutoImages, cache);
+    return discovered.length > 0
+      ? discovered
+      : [{ input: "(auto-detect latest attachment)", error: new Error(`No image attachment was created in the last ${Math.round(RECENT_ATTACHMENT_MS / 60_000)} minutes`) }];
+  }
+  if (inputs.length > 1 && inputs.every(isAutoImageReference)) {
+    const discovered = await discoverImageBatch(inputs.length, cache);
+    if (discovered.length > 0) {
+      const results: Array<ResolvedImageInput | { input: string; error: Error }> = discovered.map((item, index) => ({
+        input: inputs[index] ?? item.input,
+        resolved: item.resolved,
+      }));
+      while (results.length < inputs.length) {
+        const input = inputs[results.length] ?? `(attachment ${results.length + 1})`;
+        results.push({ input, error: new Error(`No unused recent attachment was available for image index ${results.length + 1}`) });
+      }
+      return results;
     }
   }
 
-  if (isGenericAttachmentReference(requested)) {
-    for (const clipboardCandidate of [
-      join(tmpdir(), "opencode-clipboard.png"),
-      join(tmpdir(), "opencode", "opencode-clipboard.png"),
-    ]) {
-      const verified = await verifyImageCandidate(clipboardCandidate);
-      if (verified) return { path: verified, strategy: "known OpenCode clipboard temporary file" };
-    }
-    const now = Date.now();
-    const openCodeMatches = (await Promise.all(getOpenCodeRoots().map((root) => scanRootForImages(root))))
-      .flat()
-      .filter((match) => now - match.mtimeMs <= RECENT_ATTACHMENT_MS);
-    const systemTempMatches = (await Promise.all(getTempRoots().map((root) => scanRootForImages(root))))
-      .flat()
-      .filter((match) => now - match.mtimeMs <= Math.min(RECENT_ATTACHMENT_MS, 5 * 60 * 1000));
-    const uniqueMatches = new Map<string, { path: string; mtimeMs: number }>();
-    for (const match of [...openCodeMatches, ...systemTempMatches]) {
-      const key = platform() === "win32" ? match.path.toLowerCase() : match.path;
-      const existing = uniqueMatches.get(key);
-      if (!existing || match.mtimeMs > existing.mtimeMs) uniqueMatches.set(key, match);
-    }
-    const matches = [...uniqueMatches.values()]
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    if (matches.length > 1 && Math.abs((matches[0]?.mtimeMs ?? 0) - (matches[1]?.mtimeMs ?? 0)) < 2000) {
-      throw new Error("Several equally recent OpenCode image attachments were found; the client must pass the path or inline data for the intended image.");
-    }
-    for (const match of matches) {
-      const verified = await verifyImageCandidate(match.path);
-      if (verified) return { path: verified, strategy: "newest recent OpenCode cache attachment" };
+  const excluded = new Set<string>();
+  const resolved: Array<ResolvedImageInput | { input: string; error: Error }> = [];
+  for (const input of inputs) {
+    try {
+      resolved.push({ input, resolved: await resolveImagePath(input, excluded, cache) });
+    } catch (error) {
+      resolved.push({ input, error: error instanceof Error ? error : new Error(String(error)) });
     }
   }
-
-  throw new Error(`Image could not be resolved from the supplied path or known OpenCode/system temporary caches (${wantedBasename || "unnamed attachment"}).`);
+  return resolved;
 }
 
 async function prepareImage(source: string | Buffer): Promise<PreparedImage> {
@@ -522,7 +712,7 @@ async function prepareImage(source: string | Buffer): Promise<PreparedImage> {
   const usePng = metadata.format === "png" || Boolean(metadata.hasAlpha);
   let pipeline = sharp(source, { limitInputPixels: MAX_IMAGE_PIXELS, pages: 1, animated: false })
     .rotate()
-    .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true });
+    .resize({ width: 1024, height: 4096, fit: "inside", withoutEnlargement: true });
   pipeline = usePng
     ? pipeline.png({ compressionLevel: 9, palette: false })
     : pipeline.flatten({ background: "#ffffff" }).jpeg({ quality: 82, chromaSubsampling: "4:4:4", mozjpeg: true });
@@ -587,6 +777,7 @@ function visionPrompt(additionalPrompt?: string): string {
     "Return one concise JSON object with: summary, canvas, layout, components, visibleText, colors, typography, spacing, interactions, accessibility, and uncertainties.",
     "For components, include type, label/text, approximate position, size, state, and styling when visible.",
     "Use hex colors only when you can estimate them; mark estimates as approximate.",
+    "Keep the JSON compact, prioritize high-confidence details, and avoid repetition so it fits within a 600-token response budget.",
     "Do not use Markdown fences or prose outside the JSON.",
     additionalPrompt?.trim() ? `User focus: ${additionalPrompt.trim()}` : "",
   ].filter(Boolean).join("\n");
@@ -686,7 +877,7 @@ async function analyzeWithOpenAI(image: PreparedImage, prompt: string): Promise<
         { type: "image_url", image_url: { url: dataUrl, detail: "low" } },
       ],
     }],
-    max_completion_tokens: 850,
+    max_completion_tokens: OPENAI_MAX_OUTPUT_TOKENS,
     response_format: { type: "json_object" },
     temperature: 0.1,
   });
@@ -799,7 +990,7 @@ function formatImageResult(
   image: PreparedImage | null,
   result: ImageAnalysisResult,
 ): string {
-  const header = `--- [Index ${index}] Visual UI JSON Analysis (Provider: ${result.provider}) ---`;
+  const header = `--- [Image Index ${index}] Visual Analysis ---`;
   const payload = {
     image: {
       input: summarizeImageInput(input),
@@ -812,7 +1003,7 @@ function formatImageResult(
     analysis: result.analysis,
     attempts: result.attempts,
   };
-  return `${header}\n\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n\n--- [End Index ${index}] ---`;
+  return `${header}\n\nProvider: ${result.provider}\n\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n\n--- [End Image Index ${index}] ---`;
 }
 
 function summarizeImageInput(input: string): string {
@@ -1265,18 +1456,20 @@ server.registerTool(
   "analyze_images",
   {
     title: "Analyze Images in Order",
-    description: "Resolve one or more local/OpenCode image paths, resize them safely, analyze each in strict order with Gemini then OpenAI low-detail then local OCR, and return delimited JSON context.",
+    description: "Resolve explicit images or auto-detect recent editor attachments through a bounded three-tier resolver, then analyze each sequentially with Gemini, OpenAI low-detail, or local OCR fallback.",
     inputSchema: {
       image_paths: z.union([
         z.string().min(1),
         z.array(z.string().min(1)).min(1).max(MAX_IMAGES),
-      ]).describe("A single image path/attachment reference or an ordered array of paths."),
+      ]).optional().describe("Optional single image path/attachment reference or ordered array. Omit it to auto-detect the newest recent attachment."),
+      max_auto_images: z.number().int().min(1).max(MAX_IMAGES).optional().describe("When image_paths is omitted, return up to this many recent attachments in chronological upload order. Default: 1."),
       prompt: z.string().max(2000).optional().describe("Optional analysis focus, such as accessibility or React component reconstruction."),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
-  async ({ image_paths, prompt }) => withImageQueue(async () => {
-    const paths = Array.isArray(image_paths) ? image_paths : [image_paths];
+  async ({ image_paths, max_auto_images, prompt }) => withImageQueue(async () => {
+    const paths = image_paths === undefined ? undefined : Array.isArray(image_paths) ? image_paths : [image_paths];
+    const resolvedInputs = await resolveImageBatch(paths, max_auto_images ?? 1);
     const disabledProviders = new Set<ProviderName>();
     let worker: Worker | null = null;
     let workerInitializationError: string | null = null;
@@ -1303,13 +1496,15 @@ server.registerTool(
     };
 
     try {
-      for (let index = 0; index < paths.length; index += 1) {
-        const input = paths[index] ?? "";
+      for (let index = 0; index < resolvedInputs.length; index += 1) {
+        const item = resolvedInputs[index];
+        const input = item?.input ?? "(unknown image input)";
         let resolved: ResolvedImage | null = null;
         let prepared: PreparedImage | null = null;
         let result: ImageAnalysisResult;
         try {
-          resolved = await resolveImagePath(input);
+          if (!item || "error" in item) throw item?.error ?? new Error("Image resolver returned no result");
+          resolved = item.resolved;
           const imageSource = resolved.buffer ?? resolved.path;
           if (!imageSource) throw new Error("Resolved image contains no readable data");
           prepared = await prepareImage(imageSource);

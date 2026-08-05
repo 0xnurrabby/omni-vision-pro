@@ -17,6 +17,7 @@ import {
   type JSONPath,
   type ParseError,
 } from "jsonc-parser";
+import { detectRuntimeEditor, runtimeEditorLabel, type RuntimeEditor } from "./editor-detection.js";
 import {
   getManagedRuntimeDirectory,
   getOmniDataDirectory,
@@ -25,7 +26,7 @@ import {
   PACKAGE_NAME,
 } from "./paths.js";
 
-export type ClientName = "codex" | "opencode" | "claude" | "cursor";
+export type ClientName = "codex" | "opencode" | "claude" | "claude-desktop" | "cursor" | "vscode";
 type ScopeName = "user" | "project";
 type ProviderName = "auto" | "ocr" | "gemini" | "openai" | "both";
 type CloudProviderName = "gemini" | "openai";
@@ -119,7 +120,7 @@ interface EntryInspection {
 
 const SERVER_NAME = PACKAGE_NAME;
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CLIENTS: ClientName[] = ["codex", "opencode", "claude", "cursor"];
+const CLIENTS: ClientName[] = ["codex", "opencode", "claude", "claude-desktop", "cursor", "vscode"];
 const JSON_FORMAT_DEFAULTS: FormattingOptions = {
   insertSpaces: true,
   tabSize: 2,
@@ -245,7 +246,12 @@ function normalizeClientAlias(value: string): ClientName | "all" | null {
     "open-code": "opencode",
     claude: "claude",
     "claude-code": "claude",
+    "claude-desktop": "claude-desktop",
     cursor: "cursor",
+    code: "vscode",
+    "vs-code": "vscode",
+    vscode: "vscode",
+    "visual-studio-code": "vscode",
   };
   return aliases[normalized] ?? null;
 }
@@ -255,7 +261,7 @@ function parseClients(value: string): ClientName[] {
   const requested = value.split(",").map((item) => item.trim()).filter(Boolean);
   const parsed = requested.map((item) => {
     const client = normalizeClientAlias(item);
-    if (!client) throw new Error(`Unknown client '${item}'. Use: ${CLIENTS.join(", ")}, claude-code, or all.`);
+    if (!client) throw new Error(`Unknown client '${item}'. Use: ${CLIENTS.join(", ")}, claude-code, vscode, or all.`);
     return client;
   });
   if (parsed.includes("all")) {
@@ -347,7 +353,11 @@ function parseOptions(args: string[]): CliOptions {
       options.providerExplicit = true;
     } else if (arg === "--from-clipboard" || arg === "--clipboard") {
       options.fromClipboard = true;
-    } else if (arg === "--all") options.clients = [...CLIENTS];
+    } else if (arg === "--target") {
+      options.clients.push(...parseClients(nextOptionValue(args, index, arg)));
+      index += 1;
+    } else if (arg.startsWith("--target=")) options.clients.push(...parseClients(arg.slice("--target=".length)));
+    else if (arg === "--all") options.clients = [...CLIENTS];
     else if (arg === "--gemini-key" || arg === "--openai-key" || arg.startsWith("--gemini-key=") || arg.startsWith("--openai-key=")) {
       throw new Error("API keys are not accepted as command arguments because shell history can expose them. Use an environment variable or the hidden setup prompt.");
     } else if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
@@ -494,7 +504,7 @@ function isOwnedInvocation(command: unknown, args: unknown, runtime?: RuntimeCom
   return false;
 }
 
-function jsonEntryIsOwned(client: "opencode" | "cursor" | "claude", entry: unknown, runtime?: RuntimeCommand): boolean {
+function jsonEntryIsOwned(client: Exclude<ClientName, "codex">, entry: unknown, runtime?: RuntimeCommand): boolean {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   const record = entry as Record<string, unknown>;
   if (client === "opencode") {
@@ -527,10 +537,33 @@ function cursorConfigPath(scope: ScopeName): string {
     : join(getSetupHome(), ".cursor", "mcp.json");
 }
 
+function vscodeConfigPath(scope: ScopeName): string {
+  if (scope === "project") return resolve(process.cwd(), ".vscode", "mcp.json");
+  if (process.env.OMNI_SETUP_HOME?.trim()) return join(getSetupHome(), ".vscode-user", "mcp.json");
+  if (platform() === "win32") {
+    const appData = process.env.APPDATA?.trim();
+    return join(appData ? resolve(appData) : getSetupHome(), "Code", "User", "mcp.json");
+  }
+  if (platform() === "darwin") return join(getSetupHome(), "Library", "Application Support", "Code", "User", "mcp.json");
+  const configHome = process.env.XDG_CONFIG_HOME?.trim() ? resolve(process.env.XDG_CONFIG_HOME) : join(getSetupHome(), ".config");
+  return join(configHome, "Code", "User", "mcp.json");
+}
+
+function claudeDesktopConfigPath(): string {
+  if (process.env.OMNI_SETUP_HOME?.trim()) return join(getSetupHome(), ".claude-desktop", "claude_desktop_config.json");
+  if (platform() === "win32") {
+    const appData = process.env.APPDATA?.trim();
+    return join(appData ? resolve(appData) : getSetupHome(), "Claude", "claude_desktop_config.json");
+  }
+  if (platform() === "darwin") return join(getSetupHome(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  const configHome = process.env.XDG_CONFIG_HOME?.trim() ? resolve(process.env.XDG_CONFIG_HOME) : join(getSetupHome(), ".config");
+  return join(configHome, "Claude", "claude_desktop_config.json");
+}
+
 async function inspectJsonEntry(
-  client: "opencode" | "cursor" | "claude",
+  client: Exclude<ClientName, "codex">,
   path: string,
-  containerKey: "mcp" | "mcpServers",
+  containerKey: "mcp" | "mcpServers" | "servers",
   runtime?: RuntimeCommand,
 ): Promise<EntryInspection> {
   if (!existsSync(path)) return { exists: false, owned: false, detail: `config not found: ${path}` };
@@ -573,10 +606,40 @@ async function mergeCursor(runtime: RuntimeCommand, scope: ScopeName): Promise<s
   return `${document.path}${backup ? ` (backup: ${basename(backup)})` : document.existed ? " (already current)" : ""}`;
 }
 
+async function mergeVscode(runtime: RuntimeCommand, scope: ScopeName): Promise<string> {
+  const document = await readJsonDocument(vscodeConfigPath(scope));
+  const servers = objectAt(document.value, "servers", document.path);
+  if (servers && SERVER_NAME in servers && !jsonEntryIsOwned("vscode", servers[SERVER_NAME], runtime)) {
+    throw collisionError("vscode", document.path);
+  }
+  updateJsonValue(document, ["servers", SERVER_NAME], {
+    type: "stdio",
+    command: runtime.command,
+    args: runtime.args,
+  });
+  const backup = await writeJsonDocument(document);
+  return `${document.path}${backup ? ` (backup: ${basename(backup)})` : document.existed ? " (already current)" : ""}`;
+}
+
+async function mergeClaudeDesktop(runtime: RuntimeCommand, scope: ScopeName): Promise<string> {
+  if (scope === "project") throw new Error("Claude Desktop supports user-wide MCP configuration only.");
+  const document = await readJsonDocument(claudeDesktopConfigPath());
+  const servers = objectAt(document.value, "mcpServers", document.path);
+  if (servers && SERVER_NAME in servers && !jsonEntryIsOwned("claude-desktop", servers[SERVER_NAME], runtime)) {
+    throw collisionError("claude-desktop", document.path);
+  }
+  updateJsonValue(document, ["mcpServers", SERVER_NAME], {
+    command: runtime.command,
+    args: runtime.args,
+  });
+  const backup = await writeJsonDocument(document);
+  return `${document.path}${backup ? ` (backup: ${basename(backup)})` : document.existed ? " (already current)" : ""}`;
+}
+
 async function removeJsonEntry(
-  client: "opencode" | "cursor" | "claude",
+  client: Exclude<ClientName, "codex">,
   path: string,
-  containerKey: "mcp" | "mcpServers",
+  containerKey: "mcp" | "mcpServers" | "servers",
 ): Promise<boolean> {
   if (!existsSync(path)) return false;
   const document = await readJsonDocument(path);
@@ -667,8 +730,10 @@ async function configureClient(client: ClientName, runtime: RuntimeCommand, scop
     return configureCodex(runtime);
   }
   if (client === "claude") return configureClaude(runtime, scope);
+  if (client === "claude-desktop") return mergeClaudeDesktop(runtime, scope);
   if (client === "opencode") return mergeOpenCode(runtime, scope);
-  return mergeCursor(runtime, scope);
+  if (client === "cursor") return mergeCursor(runtime, scope);
+  return mergeVscode(runtime, scope);
 }
 
 async function removeClient(client: ClientName, scope: ScopeName): Promise<boolean> {
@@ -691,7 +756,10 @@ async function removeClient(client: ClientName, scope: ScopeName): Promise<boole
     return true;
   }
   if (client === "opencode") return removeJsonEntry("opencode", openCodeConfigPath(scope), "mcp");
-  return removeJsonEntry("cursor", cursorConfigPath(scope), "mcpServers");
+  if (client === "cursor") return removeJsonEntry("cursor", cursorConfigPath(scope), "mcpServers");
+  if (client === "vscode") return removeJsonEntry("vscode", vscodeConfigPath(scope), "servers");
+  if (scope === "project") return false;
+  return removeJsonEntry("claude-desktop", claudeDesktopConfigPath(), "mcpServers");
 }
 
 function getClientDetections(): ClientDetection[] {
@@ -709,6 +777,11 @@ function getClientDetections(): ClientDetection[] {
 
   const cursorCli = executableExists("cursor");
   const cursorDetected = cursorCli || existsSync(join(getSetupHome(), ".cursor"));
+
+  const vscodeCli = executableExists("code") || executableExists("code-insiders");
+  const vscodeDetected = vscodeCli || existsSync(dirname(vscodeConfigPath("user")));
+
+  const claudeDesktopDetected = existsSync(dirname(claudeDesktopConfigPath()));
 
   return [
     {
@@ -734,6 +807,18 @@ function getClientDetections(): ClientDetection[] {
       detected: cursorDetected,
       configurable: true,
       detail: cursorDetected ? "Cursor found" : "Not detected; a config can still be prepared",
+    },
+    {
+      client: "vscode",
+      detected: vscodeDetected,
+      configurable: true,
+      detail: vscodeDetected ? "Visual Studio Code found" : "Not detected; a config can still be prepared",
+    },
+    {
+      client: "claude-desktop",
+      detected: claudeDesktopDetected,
+      configurable: true,
+      detail: claudeDesktopDetected ? "Claude Desktop settings found" : "Not detected; a config can still be prepared",
     },
   ];
 }
@@ -847,20 +932,36 @@ function formatClients(clients: ClientName[]): string {
     codex: "Codex",
     opencode: "OpenCode",
     claude: "Claude Code",
+    "claude-desktop": "Claude Desktop",
     cursor: "Cursor",
+    vscode: "Visual Studio Code",
   };
   return clients.map((client) => labels[client]).join(", ");
 }
 
 async function chooseClients(options: CliOptions): Promise<ClientName[]> {
   if (options.clients.length > 0) return options.clients;
+  const active = detectRuntimeEditor();
+  if (active.editor) {
+    const activeDetection = getClientDetections().find((item) => item.client === active.editor);
+    if (activeDetection?.configurable) {
+      console.log(`Active client detected: ${runtimeEditorLabel(active.editor)} (${active.evidence})`);
+      return [active.editor];
+    }
+  }
   const detected = detectClients();
-  if (options.yes || !input.isTTY || !output.isTTY) return detected;
+  if (detected.length === 1) return detected;
+  if (options.yes || !input.isTTY || !output.isTTY) {
+    throw new Error("The active editor could not be identified safely. Run setup again with --target codex, opencode, claude, claude-desktop, cursor, vscode, or all.");
+  }
   const rl = createInterface({ input, output });
   try {
-    const defaultValue = detected.length > 0 ? detected.join(",") : "all";
-    const answer = await rl.question(`Clients to set up [${defaultValue}]: `);
-    return parseClients(answer.trim() || defaultValue);
+    const defaultValue = detected.length === 1 ? detected[0] ?? "" : "";
+    const suffix = defaultValue ? ` [${defaultValue}]` : "";
+    const answer = await rl.question(`Choose one target client${suffix}: `);
+    const selected = answer.trim() || defaultValue;
+    if (!selected) throw new Error("Choose one client, or enter 'all' to configure every supported client.");
+    return parseClients(selected);
   } finally {
     rl.close();
   }
@@ -1194,10 +1295,17 @@ async function checkClient(client: ClientName, scope: ScopeName, runtime?: Runti
       detail: status.exists ? status.detail : "not configured",
     };
   }
+  if (client === "claude-desktop" && scope === "project") {
+    return { configured: false, detail: "Claude Desktop has no project-scoped MCP configuration" };
+  }
   const path = client === "opencode"
     ? openCodeConfigPath(scope)
-    : cursorConfigPath(scope);
-  const key = client === "opencode" ? "mcp" : "mcpServers";
+    : client === "cursor"
+      ? cursorConfigPath(scope)
+      : client === "vscode"
+        ? vscodeConfigPath(scope)
+        : claudeDesktopConfigPath();
+  const key = client === "opencode" ? "mcp" : client === "vscode" ? "servers" : "mcpServers";
   const inspection = await inspectJsonEntry(client, path, key, runtime);
   return {
     configured: inspection.exists && inspection.owned,
@@ -1442,7 +1550,7 @@ async function providerCommand(args: string[]): Promise<void> {
 async function setupCommand(version: string, args: string[]): Promise<void> {
   const options = parseOptions(args);
   const clients = await chooseClients(options);
-  if (clients.length === 0) throw new Error("No supported client was detected. Install a client or specify one, for example: setup cursor.");
+  if (clients.length === 0) throw new Error("No supported active client was detected. Specify one with --target cursor, --target vscode, or another supported client.");
   let provider: ProviderName | undefined;
   let providerKeys: ProviderKeys | undefined;
   if (options.fromClipboard) {
@@ -1529,7 +1637,7 @@ async function doctorCommand(version: string, args: string[]): Promise<void> {
 
 async function uninstallCommand(args: string[]): Promise<void> {
   const options = parseOptions(args);
-  const clients = options.clients.length > 0 ? options.clients : detectClients();
+  const clients = await chooseClients(options);
   if (clients.length === 0) console.log("[INFO] No supported installed client was detected; nothing to remove.");
   for (const client of clients) {
     try {
@@ -1549,18 +1657,19 @@ function printHelp(version: string): void {
     "  npx --yes omni-vision-pro@latest setup --yes\n\n" +
     "Add a cloud key from an AI chat (copy the API key first):\n" +
     "  npx --yes omni-vision-pro@latest provider set --from-clipboard\n\n" +
-    "Set up one client:\n" +
-    "  npx --yes omni-vision-pro@latest setup cursor\n" +
-    "  npx --yes omni-vision-pro@latest setup claude-code\n\n" +
+    "Set up one client explicitly:\n" +
+    "  npx --yes omni-vision-pro@latest setup --target cursor\n" +
+    "  npx --yes omni-vision-pro@latest setup --target claude-code\n\n" +
     "Commands:\n" +
-    "  setup       Auto-detect and configure Codex, OpenCode, Claude Code, and Cursor\n" +
+    "  setup       Detect the active editor and configure that client only\n" +
     "  provider    Add/remove keys, switch Gemini/OpenAI, or turn AI off (OCR-only)\n" +
     "  doctor      Inspect the installed runtime and client configurations\n" +
     "  uninstall   Remove only installer-owned omni-vision-pro client entries\n" +
     "  serve       Start the MCP stdio server (used by clients)\n\n" +
     "Useful options:\n" +
-    "  [codex|opencode|claude-code|cursor|all]\n" +
-    "  --client codex,opencode,claude,cursor | --all\n" +
+    "  [codex|opencode|claude-code|claude-desktop|cursor|vscode|all]\n" +
+    "  --target codex|opencode|claude|claude-desktop|cursor|vscode|all\n" +
+    "  --client <name> (backward-compatible alias) | --all\n" +
     "  --user (default) | --project\n" +
     "  --provider auto|ocr|gemini|openai|both (setup default: auto)\n" +
     "  --from-clipboard (read a copied Gemini/OpenAI key without putting it in chat)\n" +

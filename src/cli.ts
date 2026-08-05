@@ -11,7 +11,11 @@ const CLIENT_ALIASES = new Map<string, string>([
   ["opencode", "opencode"],
   ["claude", "claude"],
   ["claude-code", "claude"],
+  ["claude-desktop", "claude-desktop"],
   ["cursor", "cursor"],
+  ["code", "vscode"],
+  ["vscode", "vscode"],
+  ["visual-studio-code", "vscode"],
 ]);
 
 function rejectSecretArguments(values: string[]): void {

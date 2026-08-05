@@ -30,13 +30,21 @@ You need Node.js 20.10 or newer. Install the MCP server once; local OCR works im
 
 ### 1. Install once from an AI chat
 
-Paste this command into Codex, OpenCode, Claude Code, or Cursor chat and ask it to run it:
+Paste this command into Codex, OpenCode, Claude Code, Cursor, or VS Code chat and ask it to run it:
 
 ```bash
 npx --yes omni-vision-pro@latest setup --yes
 ```
 
-That one command detects supported clients, installs a private version-pinned runtime, writes the MCP configuration, and verifies all three tools. Setup is now finished; you do not need to install or configure the MCP server again when you add an API key later.
+That command detects the editor that launched it, installs a private version-pinned runtime, updates only that editor's MCP configuration, and verifies all three tools. It will not silently change every installed editor. Setup is now finished; adding or changing an API key later does not reinstall the MCP server.
+
+To choose the client yourself, or intentionally configure every supported client:
+
+```bash
+npx --yes omni-vision-pro@latest setup --target cursor
+npx --yes omni-vision-pro@latest setup --target vscode
+npx --yes omni-vision-pro@latest setup --target all
+```
 
 Restart or reload the AI client once, then ask:
 
@@ -108,7 +116,7 @@ npx --yes omni-vision-pro@latest doctor
 | Capability | What you get |
 | --- | --- |
 | Image context | One screenshot or an ordered batch, with a result for every index. |
-| Attachment recovery | Absolute paths, relative paths, `file://` URLs, Markdown image links, inline image data, OpenCode caches, and bounded temporary-folder scans. |
+| Attachment recovery | A three-tier resolver checks explicit input, the active editor's attachment cache, then recent OS temporary/clipboard cache files. |
 | UI analysis | Structured JSON for layout, components, text, typography, colors, spacing, interactions, accessibility, and uncertainties. |
 | Code context | A clean file tree followed by safe text contents from a file or directory. |
 | ZIP context | In-memory ZIP inspection without extracting files to disk. |
@@ -116,6 +124,16 @@ npx --yes omni-vision-pro@latest doctor
 | Automatic vision | Local OCR works by default. Add a Gemini or OpenAI key later to enable AI vision; cloud failures fall back to OCR. |
 
 No special image folder is required. If a client has the image bytes only in memory, pass an inline `data:image/...;base64,...` reference.
+
+### Smart image auto-detection
+
+`analyze_images` can be called with an explicit path, an ordered path array, or no path at all:
+
+1. **Explicit input** - absolute paths, relative paths, `file://` URLs, Markdown image links, and inline Base64 image data are tried first.
+2. **Active editor cache** - Omni detects Codex, OpenCode, Claude Code/Desktop, Cursor, or VS Code and searches only that client's known attachment locations.
+3. **Recent temporary fallback** - if the first two tiers miss, Omni scans the OS temp directory and clipboard-style cache folders for supported images created or modified during the last 10 minutes.
+
+Automatic scans are bounded, ignore symlinks and project/vendor folders, and never search Desktop, Documents, Downloads, or arbitrary source directories. Multiple auto-detected images are returned oldest-to-newest so the result order matches their attachment order. Explicit paths are allowed to reference older images because the user selected them intentionally.
 
 <img src="docs/assets/section-divider.svg" alt="" width="100%">
 
@@ -127,8 +145,10 @@ No special image folder is required. If a client has the image bytes only in mem
 | OpenCode | Yes | Yes | Project and user `opencode.json` or `opencode.jsonc`. |
 | Claude Code | Yes | Yes | Automatic setup uses the `claude` CLI. User and project scopes are supported. |
 | Cursor | Yes | Yes | User or project `mcp.json`, plus a one-click install link below. |
-| Visual Studio Code | No | Yes | Use VS Code's `mcp.json` configuration. |
-| Claude Desktop | No | Yes | Add the server to `claude_desktop_config.json`. |
+| Visual Studio Code | Yes | Yes | Automatic setup writes the user or workspace `mcp.json` entry. |
+| Claude Desktop | Yes | Yes | Automatic setup safely merges the user-wide `claude_desktop_config.json` entry. |
+
+Automatic setup targets one active client by default. Use `--target all` only when you intentionally want every supported client configured.
 
 <img src="docs/assets/section-divider.svg" alt="" width="100%">
 
@@ -154,7 +174,9 @@ Adding or replacing a key selects that provider. Turning AI off keeps the keys f
 
 ### OpenAI image handling
 
-When OpenAI is enabled, the server applies EXIF orientation, limits the prepared image to a 1024 pixel box, compresses it with `sharp`, and sends `gpt-4o-mini` with an explicit `detail: "low"` setting. This is designed to reduce cost, but provider pricing and output size can change. Tiny text, exact coordinates, and estimated colors remain best-effort.
+When OpenAI is enabled, the server applies EXIF orientation, limits the prepared image to 1024px wide and 4096px tall, compresses it to JPEG or PNG with `sharp`, and sends `gpt-4o-mini` with explicit `detail: "low"`, one completion, and a default 600-token output ceiling. These are strong cost guardrails designed for sub-cent analysis and approximately sub-$0.001 requests under current pricing, but no third-party billing amount can be guaranteed permanently.
+
+OpenAI documents that low detail gives the model a 512px low-resolution view. Layout, larger text, component hierarchy, and locally measured color palettes remain useful; tiny text, exact coordinates, and pixel-perfect reconstruction are best-effort. Local `sharp` measurements are included separately so dominant and palette colors do not depend only on the low-detail model view.
 
 ### Gemini model handling
 
@@ -172,7 +194,7 @@ Cloud analysis receives only the resized image. Source files and ZIP contents st
 
 | Tool | Input | Output |
 | --- | --- | --- |
-| `analyze_images` | `image_paths`: one reference or an ordered array; optional `prompt` | Delimited JSON blocks such as `--- [Index 1] Visual UI JSON Analysis (Provider: OpenAI) ---`. |
+| `analyze_images` | Optional `image_paths`; optional `max_auto_images`; optional `prompt` | Delimited blocks beginning `--- [Image Index 1] Visual Analysis ---`, with provider and structured JSON details. |
 | `read_code_context` | `path`, optional `max_files`, optional `max_output_bytes` | A file tree and readable source contents. |
 | `read_zip_context` | `.zip` `path`, optional `max_files`, optional `max_output_bytes` | A virtual tree and readable archive contents without extraction. |
 
@@ -189,6 +211,21 @@ Cloud analysis receives only the resized image. Source files and ZIP contents st
 ```
 
 Images are processed sequentially in the exact supplied order. A failed image gets its own result and does not discard later images.
+
+To analyze the newest attachment without supplying a path:
+
+```json
+{}
+```
+
+To recover several recent attachments automatically:
+
+```json
+{
+  "max_auto_images": 3,
+  "prompt": "Compare the responsive states in upload order."
+}
+```
 
 ### Read a project folder
 
@@ -436,6 +473,8 @@ Useful optional controls:
 | `GEMINI_MODEL` | Select the Gemini model. |
 | `GEMINI_FALLBACK_MODEL` | Select the Gemini fallback model. |
 | `OMNI_MAX_IMAGES` | Maximum images per request, default `10`. |
+| `OMNI_RECENT_ATTACHMENT_MS` | Auto-detection window, default and maximum `600000` (10 minutes). |
+| `OMNI_OPENAI_MAX_OUTPUT_TOKENS` | OpenAI output ceiling, default `600`, allowed range `128-700`. |
 | `OMNI_CLOUD_TIMEOUT_MS` | Cloud request timeout, default `30000`. |
 | `OMNI_OCR_TIMEOUT_MS` | OCR request timeout, default `90000`. |
 
@@ -452,7 +491,7 @@ The server also accepts a project `.env`, and only allowlisted settings are load
 | The wrong AI provider is being used | Run `npx --yes omni-vision-pro@latest provider`, choose the provider you want, then restart/reload the AI client. |
 | The client cannot find `npx` | Install Node.js 20.10+, restart the client, or replace `npx` with its full path such as `C:\\Program Files\\nodejs\\npx.cmd`. |
 | The server is installed but not visible | Run `npx --yes omni-vision-pro@latest doctor`, restart/reload the client, then approve the server or project trust prompt. |
-| An image attachment is not found | Attach the image in the same request, or pass its inline data URL. No special copy folder is needed. |
+| An image attachment is not found | Call `analyze_images` without `image_paths` immediately after attaching it. Omni automatically checks the active editor cache and the last 10 minutes of OS temporary attachment data; no special copy folder is needed. |
 | OCR takes too long | The first OCR request starts a local worker. Keep client tool timeouts above 90 seconds; image arrays run sequentially. |
 | Gemini reports a retired model | Set `GEMINI_MODEL=gemini-2.5-flash` in the private `.env`. |
 | Code or ZIP access is denied | If `OMNI_ALLOWED_ROOTS` is set, include the intended project folder, restart the client, and try again. |
@@ -504,7 +543,7 @@ npx --yes omni-vision-pro@latest provider remove all
 npx --yes omni-vision-pro@latest doctor
 npx --yes omni-vision-pro@latest doctor cursor
 npx --yes omni-vision-pro@latest uninstall
-npx --yes omni-vision-pro@latest uninstall --all
+npx --yes omni-vision-pro@latest uninstall --target all
 ```
 
 Uninstall removes only entries recognized as managed by this installer. It keeps the private `.env` so reinstalling does not lose credentials. Delete that file separately when you want to erase stored keys.
