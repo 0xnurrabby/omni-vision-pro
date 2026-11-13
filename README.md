@@ -1,5 +1,4 @@
-GitFi.fun sync ID: GF-26840713-7D0B94AD · wallet gitfi-2a8fde61e0c8eb43.near · repo 0xnurrabby/omni-vision-pro
-
+GitFi.fun sync ID: GF-A9A8F732-E8D93AFF · wallet gitfi-2a8fde61e0c8eb43.near · repo 0xnurrabby/omni-vision-pro
 <p align="center">
   <img src="docs/assets/omni-vision-pro-banner.svg" alt="omni-vision-pro: visual, code, and ZIP context for text-only AI models" width="100%">
 </p>
